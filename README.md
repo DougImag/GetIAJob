@@ -59,7 +59,7 @@ Application Streamlit avec une **page d'accueil** publique et un **espace connec
 
 - **Header** fixe, sur toute la largeur de la fenêtre : à gauche le **logo et le nom GetIAJob, qui ramènent à l'accueil** (icône [Lucide *briefcase-business*](https://lucide.dev/icons/briefcase-business), licence ISC), puis le **nom de la page courante** ; à droite le **bouton sombre / clair** (lune / soleil) et le **menu utilisateur** (nom d'utilisateur + menu déroulant : *Mon compte*, *Se déconnecter*), ou un bouton **Se connecter / S'inscrire** si on n'est pas connecté.
 - **Thème sombre / clair** : l'icône du header bascule l'affichage (thèmes `[theme.light]` et `[theme.dark]` de `.streamlit/config.toml`, styles maison adaptés au mode sombre). Le choix est mémorisé dans le navigateur pour toutes les pages ; sans choix, l'application suit le réglage du système.
-- **Menu de gauche** (une fois connecté) : *Mes ressources* (Tableau de bord, Mon profil), *Recherche* (Nouvelle recherche, Mes recherches, Mes candidatures) et, pour les administrateurs, *Admin* (Supervision, Qualité & IA, Utilisateurs, Sources d'annonces). Il est masqué sur la page d'accueil et absent tant qu'on n'est pas connecté. Il est **déplié automatiquement à chaque connexion** (même s'il avait été replié avant une déconnexion), sauf sur mobile.
+- **Menu de gauche** (une fois connecté, avec en pied de page les modèles Ollama utilisés) : *Mes ressources* (Tableau de bord, Mon profil), *Recherche* (Nouvelle recherche, Mes recherches, Mes candidatures) et, pour les administrateurs, *Admin* (Supervision, Qualité & IA, Utilisateurs, Sources d'annonces). Il est masqué sur la page d'accueil et absent tant qu'on n'est pas connecté. Il est **déplié automatiquement à chaque connexion** (même s'il avait été replié avant une déconnexion), sauf sur mobile.
 
 | Page | Contenu |
 |---|---|
@@ -270,6 +270,7 @@ Dans GitHub, **Settings › Environments › New environment** `production`, pui
 | Variable | Défaut | Description |
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | URL d'Ollama |
+| `LLM_TIMEOUT` | `900` | Durée maximale (s) d'un appel au LLM ; au-delà, l'étape est abandonnée |
 | `LLM_MODEL` | `qwen2.5:7b` | Modèle de chat (ex. `llama3.1:8b`, `mistral-nemo`, `qwen2.5:14b`) |
 | `LLM_NUM_CTX` | `8192` | Fenêtre de contexte envoyée à Ollama (le défaut d'Ollama tronque les CV/offres longs) |
 | `LLM_CONCURRENCY` | `2` | Appels LLM simultanés lors de l'analyse d'un CV (à aligner sur `OLLAMA_NUM_PARALLEL`) |
@@ -505,11 +506,17 @@ Tous les scripts passent par `scripts/cron-run.sh <journal> <commande>` (contene
 
 ## Journal des évolutions
 
+### 0.12.2 — 2026-11-15
+- **Suivi de l'analyse du CV** : barre de progression par étape (Identité, Expériences, Formation, Projets, Compétences, Synthèse, Indexation), étapes en cours / terminées / en échec, **temps écoulé** et **temps restant estimé** à partir des durées des dernières analyses (colonne `cv_profiles.analysis_progress`, ajoutée automatiquement).
+- **`LLM_TIMEOUT`** (900 s par défaut) : un appel au LLM bloqué (mémoire saturée…) échoue au lieu de faire attendre l'analyse indéfiniment.
+- Menu latéral : modèles Ollama affichés sur deux lignes.
+
 ### 0.12.1 — 2026-11-15
 - **CI/CD GitHub Actions** (`.github/workflows/ci-cd.yml`) : lint + tests à chaque push / PR ; sur `main`, image publiée sur GHCR puis déploiement automatique sur le VPS par SSH, avec contrôle de santé.
 - `docker-compose.prod.yml` (image GHCR, ports PostgreSQL et Streamlit fermés au public) et `deploy/deploy.sh` (déploiement / retour arrière).
 - Proxy HTTPS au choix : **Apache** existant (modèle `deploy/apache-getiajob.conf`, WebSocket compris, certificat par certbot) ou Caddy (profil `prod`, démarré par `deploy.sh` seulement s'il est actif).
 - Formatage `ruff format` appliqué à `services/access.py` et `views/home.py`.
+- Menu latéral : le pied de page affiche les modèles Ollama configurés (`LLM_MODEL`, `EMBEDDING_MODEL`).
 - Déploiement : `VPS_PORT` / `VPS_PATH` acceptés en variable **ou** en secret, contrôle des secrets manquants et test de connexion SSH avant le déploiement (port et hôte affichés dans le log).
 
 ### 0.12.0 — 2026-11-15

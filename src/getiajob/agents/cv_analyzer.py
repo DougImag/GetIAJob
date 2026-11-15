@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -99,21 +100,46 @@ SYNTHESIS_PROMPT = """Tu es un expert en recrutement. À partir du profil struct
 Réponds dans la langue du CV."""
 
 
+# Étapes de l'analyse, dans l'ordre (les 5 extractions tournent en parallèle, puis la synthèse et
+# l'indexation). Clé → (libellé, mesure de durée enregistrée par `timed`, pour estimer le temps restant).
+STEPS: dict[str, tuple[str, tuple[str, str]]] = {
+    "identity": ("Identité", ("llm", "cv_identity")),
+    "experiences": ("Expériences", ("llm", "cv_experiences")),
+    "education": ("Formation", ("llm", "cv_education")),
+    "projects": ("Projets", ("llm", "cv_projects")),
+    "skills": ("Compétences", ("llm", "cv_skills")),
+    "synthesis": ("Synthèse du profil", ("llm", "cv_synthese")),
+    "embedding": ("Indexation", ("embedding", "cv")),
+}
+PARALLEL_STEPS = tuple(TASKS)
+
+# Rappel d'avancement : progress(étape, "running" | "done" | "failed")
+Progress = Callable[[str, str], None]
+
+
+def _noop(step: str, state: str) -> None:
+    pass
+
+
 def extract_text(data: bytes, file_name: str) -> str:
     return extract_cv_text(data, file_name)
 
 
-def _run_task(name: str, text: str) -> BaseModel | None:
+def _run_task(name: str, text: str, progress: Progress = _noop) -> BaseModel | None:
     schema, instruction = TASKS[name]
     llm = get_chat_model().with_structured_output(schema)
+    progress(name, "running")
     try:
         with timed("llm", f"cv_{name}"):
-            return llm.invoke(
+            result = llm.invoke(
                 [("system", f"{COMMON_RULES}\n\n{instruction}"), ("human", f"Texte du CV :\n\n{text}")]
             )
     except Exception as exc:  # une section ratée ne doit pas faire échouer toute l'analyse
         log.warning("Extraction « %s » impossible : %s", name, exc)
+        progress(name, "failed")
         return None
+    progress(name, "done")
+    return result
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -241,11 +267,11 @@ def _contact_fallback(profile: CVProfile, text: str) -> None:
         c.location = m.group(0).strip()
 
 
-def extract_profile(text: str) -> CVProfile:
+def extract_profile(text: str, progress: Progress = _noop) -> CVProfile:
     """Texte balisé du CV → profil structuré (sans accès à la base)."""
     workers = max(1, get_settings().llm_concurrency)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {name: pool.submit(_run_task, name, text) for name in TASKS}
+        futures = {name: pool.submit(_run_task, name, text, progress) for name in TASKS}
         parts = {name: future.result() for name, future in futures.items()}
     if all(part is None for part in parts.values()):
         raise RuntimeError("Le LLM n'a pu extraire aucune section du CV (Ollama démarré ?).")
@@ -279,6 +305,7 @@ def extract_profile(text: str) -> CVProfile:
     structured = profile.model_dump(
         include={"headline", "summary", "experiences", "education", "projects", "skills", "languages"}
     )
+    progress("synthesis", "running")
     try:
         with timed("llm", "cv_synthese"):
             synthesis: ProfileSynthesis = (
@@ -293,7 +320,9 @@ def extract_profile(text: str) -> CVProfile:
             )
     except Exception as exc:
         log.warning("Synthèse du profil impossible : %s", exc)
+        progress("synthesis", "failed")
     else:
+        progress("synthesis", "done")
         profile.headline = profile.headline or synthesis.headline.strip()
         profile.summary = profile.summary or synthesis.summary.strip()
         profile.seniority = synthesis.seniority
@@ -327,7 +356,7 @@ def save_cv(data: bytes, file_name: str, user_id: int | None = None) -> int:
         return record.id
 
 
-def ensure_profile(cv_id: int, *, force: bool = False) -> CVProfile:
+def ensure_profile(cv_id: int, *, force: bool = False, progress: Progress = _noop) -> CVProfile:
     """Renvoie le profil du CV ; l'(ré)extrait s'il manque, s'il est obsolète ou si force."""
     with session_scope() as session:
         record = session.get(CVRecord, cv_id)
@@ -344,10 +373,12 @@ def ensure_profile(cv_id: int, *, force: bool = False) -> CVProfile:
             record.raw_text = extract_text(record.file_data, record.file_name)
 
         log.info("Analyse du CV %s avec le LLM (par sections)…", record.file_name)
-        profile = extract_profile(record.raw_text)
+        profile = extract_profile(record.raw_text, progress)
         record.profile = profile.model_dump(mode="json")
+        progress("embedding", "running")
         with timed("embedding", "cv"):
             record.embedding = get_embeddings().embed_query(profile.to_text())
+        progress("embedding", "done")
         # Les évaluations d'offres reposaient sur l'ancien profil : elles seront recalculées.
         session.execute(delete(JobMatch).where(JobMatch.cv_id == cv_id))
         log.info(

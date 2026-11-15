@@ -120,6 +120,8 @@ UPGRADES = [
     "ALTER TABLE job_applications ADD COLUMN IF NOT EXISTS salary VARCHAR(255)",
     "ALTER TABLE job_applications ADD COLUMN IF NOT EXISTS score DOUBLE PRECISION",
     "ALTER TABLE job_applications ADD COLUMN IF NOT EXISTS summary TEXT",
+    # v0.12.2 : avancement détaillé de l'analyse du CV (étapes, estimation du temps restant)
+    "ALTER TABLE cv_profiles ADD COLUMN IF NOT EXISTS analysis_progress JSONB",
 ]
 
 

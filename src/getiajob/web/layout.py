@@ -8,6 +8,7 @@ from html import escape
 import streamlit as st
 import streamlit.components.v1 as components
 
+from getiajob.config import get_settings
 from getiajob.scraping.base import ALL_SOURCES, SOURCE_LABELS, configured_sources
 from getiajob.services.users import SessionUser
 from getiajob.web.state import go, sign_out
@@ -346,8 +347,14 @@ def _apply_theme_switch() -> None:
 
 
 def sidebar_footer() -> None:
+    s = get_settings()
     with st.sidebar:
-        st.caption("Modèles open source via Ollama")
+        # Modèles configurés (LLM_MODEL / EMBEDDING_MODEL), pas d'appel à Ollama à chaque affichage
+        st.caption(  # « deux espaces + \n » = retour à la ligne en Markdown
+            "Modèles open source via Ollama :  \n"
+            f"`{s.llm_model}` (analyse et notes)  \n"
+            f"`{s.embedding_model}` (similarité)"
+        )
 
 
 def freshness_input(label: str, value: int, key: str | None = None, help: str | None = None) -> int:
