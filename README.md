@@ -255,7 +255,7 @@ ssh-copy-id -i ~/.ssh/getiajob_deploy.pub deploy@<IP_VPS>
 ssh-keyscan -H <IP_VPS>      # → secret VPS_KNOWN_HOSTS
 ```
 
-Dans GitHub, **Settings › Environments › New environment** `production`, puis ses secrets : `VPS_HOST`, `VPS_USER` (`deploy`), `VPS_SSH_KEY` (contenu de `~/.ssh/getiajob_deploy`), `VPS_KNOWN_HOSTS` ; variables facultatives `VPS_PORT`, `VPS_PATH`. Un enregistrement DNS du sous-domaine (**A** vers l'IP du VPS, ou **CNAME** vers le domaine principal s'il est hébergé sur ce VPS) doit exister avant `certbot` (ou avant le premier démarrage de Caddy).
+Dans GitHub, **Settings › Environments › New environment** `production`, puis ses secrets : `VPS_HOST`, `VPS_USER` (`deploy`), `VPS_SSH_KEY` (contenu de `~/.ssh/getiajob_deploy`), `VPS_KNOWN_HOSTS` ; `VPS_PORT` (port SSH s'il n'est pas 22) et `VPS_PATH`, facultatifs, en variable ou en secret. Un enregistrement DNS du sous-domaine (**A** vers l'IP du VPS, ou **CNAME** vers le domaine principal s'il est hébergé sur ce VPS) doit exister avant `certbot` (ou avant le premier démarrage de Caddy).
 
 **Retour arrière** : sur le VPS, `deploy/deploy.sh <sha d'un commit précédent>` (ou relancer le workflow d'un ancien commit depuis l'onglet *Actions*).
 
@@ -510,6 +510,7 @@ Tous les scripts passent par `scripts/cron-run.sh <journal> <commande>` (contene
 - `docker-compose.prod.yml` (image GHCR, ports PostgreSQL et Streamlit fermés au public) et `deploy/deploy.sh` (déploiement / retour arrière).
 - Proxy HTTPS au choix : **Apache** existant (modèle `deploy/apache-getiajob.conf`, WebSocket compris, certificat par certbot) ou Caddy (profil `prod`, démarré par `deploy.sh` seulement s'il est actif).
 - Formatage `ruff format` appliqué à `services/access.py` et `views/home.py`.
+- Déploiement : `VPS_PORT` / `VPS_PATH` acceptés en variable **ou** en secret, contrôle des secrets manquants et test de connexion SSH avant le déploiement (port et hôte affichés dans le log).
 
 ### 0.12.0 — 2026-11-15
 - **Adhésion sur invitation** (`INVITE_ONLY=true` par défaut) : la création de compte exige un code d'invitation à usage unique, lié à l'adresse invitée et valable `INVITATION_DAYS` jours (le premier compte d'une base vide en est dispensé ; en SSO, une invitation pour l'adresse suffit).
