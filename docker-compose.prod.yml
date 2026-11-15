@@ -23,3 +23,8 @@ services:
 
   app:
     <<: *image
+
+  # Ollama en conteneur (profil « ollama ») : jamais publié sur Internet (Docker contourne ufw).
+  # L'application le joint par le réseau Docker : OLLAMA_BASE_URL=http://ollama:11434
+  ollama:
+    ports: !reset []
