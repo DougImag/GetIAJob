@@ -8,13 +8,15 @@ d'onglet ou de fenêtre : elle tourne dans un thread du serveur, pas dans la ses
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import undefer
 
-from getiajob.db import CVRecord, JobMatch, session_scope
+from getiajob.config import get_settings
+from getiajob.db import CVRecord, JobMatch, MetricEvent, session_scope
 from getiajob.schemas import CVProfile
 
 log = logging.getLogger(__name__)
@@ -98,17 +100,145 @@ def _set_status(cv_id: int, **values) -> None:
         session.execute(update(CVRecord).where(CVRecord.id == cv_id).values(**values))
 
 
+class _ProgressTracker:
+    """Enregistre en base l'état de chaque étape (appelé depuis plusieurs threads)."""
+
+    def __init__(self, cv_id: int, steps: list[str], workers: int) -> None:
+        self.cv_id = cv_id
+        self.lock = threading.Lock()
+        self.state = {"workers": workers, "steps": dict.fromkeys(steps, "pending"), "started": {}}
+        self._save()
+
+    def _save(self) -> None:
+        try:
+            _set_status(self.cv_id, analysis_progress=self.state)
+        except Exception:  # l'avancement est informatif : il ne doit jamais faire échouer l'analyse
+            log.debug("Avancement de l'analyse non enregistré", exc_info=True)
+
+    def __call__(self, step: str, state: str) -> None:
+        with self.lock:
+            self.state["steps"][step] = state
+            if state == "running":
+                self.state["started"][step] = datetime.now(UTC).isoformat()
+            self._save()
+
+
 def run_cv_analysis(cv_id: int, force: bool = True) -> None:
     """Exécuté dans un thread du serveur : analyse le CV et enregistre le statut."""
-    from getiajob.agents.cv_analyzer import ensure_profile
+    from getiajob.agents.cv_analyzer import STEPS, ensure_profile
 
-    _set_status(cv_id, analysis_status="running", analysis_started_at=datetime.now(UTC))
+    _set_status(
+        cv_id, analysis_status="running", analysis_started_at=datetime.now(UTC), analysis_progress=None
+    )
+    tracker = _ProgressTracker(cv_id, list(STEPS), max(1, get_settings().llm_concurrency))
     try:
-        ensure_profile(cv_id, force=force)
-        _set_status(cv_id, analysis_status="done", analysis_error=None)
+        ensure_profile(cv_id, force=force, progress=tracker)
+        _set_status(cv_id, analysis_status="done", analysis_error=None, analysis_progress=None)
     except Exception as exc:
         log.exception("Échec de l'analyse du CV %s", cv_id)
         _set_status(cv_id, analysis_status="failed", analysis_error=str(exc)[:2000])
+
+
+# --------------------------------------------------------------------------- #
+# Avancement et estimation du temps restant
+# --------------------------------------------------------------------------- #
+
+HISTORY_SIZE = 5  # durées récentes prises en compte par étape
+DEFAULT_EMBEDDING_S = 5.0  # indexation (embedding) jamais mesurée
+
+
+@dataclass(frozen=True)
+class AnalysisProgress:
+    status: str | None  # pending, running…
+    steps: list[tuple[str, str, str]]  # (clé, libellé, état : pending / running / done / failed)
+    elapsed_s: float | None
+    remaining_s: float | None  # None : pas encore d'historique pour estimer
+
+    @property
+    def done(self) -> int:
+        return sum(state in ("done", "failed") for _, _, state in self.steps)
+
+    @property
+    def total(self) -> int:
+        return len(self.steps)
+
+    @property
+    def running(self) -> list[str]:
+        return [label for _, label, state in self.steps if state == "running"]
+
+
+def step_durations() -> dict[str, float]:
+    """Durée moyenne (s) de chaque étape, sur les dernières mesures réussies."""
+    from getiajob.agents.cv_analyzer import STEPS
+
+    wanted = {metric: key for key, (_, metric) in STEPS.items()}
+    samples: dict[str, list[int]] = {}
+    with session_scope() as session:
+        rows = session.execute(
+            select(MetricEvent.kind, MetricEvent.name, MetricEvent.duration_ms)
+            .where(
+                MetricEvent.ok.is_(True),
+                MetricEvent.duration_ms.is_not(None),
+                MetricEvent.kind.in_({kind for kind, _ in wanted}),
+                MetricEvent.name.in_({name for _, name in wanted}),
+            )
+            .order_by(MetricEvent.id.desc())
+            .limit(300)
+        ).all()
+    for kind, name, ms in rows:
+        key = wanted.get((kind, name))
+        if key and len(samples.setdefault(key, [])) < HISTORY_SIZE:
+            samples[key].append(ms)
+    return {key: sum(v) / len(v) / 1000 for key, v in samples.items() if v}
+
+
+def estimate_remaining(
+    steps: dict[str, str], started: dict[str, datetime], workers: int, avg: dict[str, float], now: datetime
+) -> float | None:
+    """Temps restant estimé (s) : étapes parallèles réparties sur `workers`, puis étapes successives."""
+    from getiajob.agents.cv_analyzer import PARALLEL_STEPS
+
+    llm_known = [v for k, v in avg.items() if k != "embedding"]
+    if not llm_known:
+        return None  # aucune analyse mesurée : pas d'estimation possible
+    # Étape jamais mesurée : durée moyenne des étapes LLM connues (indexation : quelques secondes)
+    fallback = {"embedding": DEFAULT_EMBEDDING_S}
+
+    def duration(key: str) -> float:
+        return avg.get(key, fallback.get(key, sum(llm_known) / len(llm_known)))
+
+    def left(key: str) -> float:
+        state = steps.get(key, "pending")
+        if state in ("done", "failed"):
+            return 0.0
+        if state == "running" and key in started:
+            return max(duration(key) - (now - started[key]).total_seconds(), 0.0)
+        return duration(key)
+
+    parts = {key: left(key) for key in steps}
+    parallel = sum(parts[k] for k in steps if k in PARALLEL_STEPS) / max(1, workers)
+    return parallel + sum(parts[k] for k in steps if k not in PARALLEL_STEPS)
+
+
+def analysis_progress(cv_id: int) -> AnalysisProgress:
+    from getiajob.agents.cv_analyzer import STEPS
+
+    with session_scope() as session:
+        status, started_at, raw = session.execute(
+            select(CVRecord.analysis_status, CVRecord.analysis_started_at, CVRecord.analysis_progress).where(
+                CVRecord.id == cv_id
+            )
+        ).one()
+    now = datetime.now(UTC)
+    raw = raw or {}
+    states: dict[str, str] = raw.get("steps") or {}
+    steps = [(key, label, states.get(key, "pending")) for key, (label, _) in STEPS.items()]
+    elapsed = (now - started_at).total_seconds() if status == "running" and started_at else None
+    remaining = None
+    if status == "running" and states:
+        started = {k: datetime.fromisoformat(v) for k, v in (raw.get("started") or {}).items()}
+        remaining = estimate_remaining(states, started, raw.get("workers") or 1, step_durations(), now)
+    return AnalysisProgress(status, steps, elapsed, remaining)
 
 
 def update_profile(user_id: int, cv_id: int, profile: CVProfile) -> None:

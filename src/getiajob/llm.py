@@ -18,6 +18,8 @@ def get_chat_model() -> ChatOllama:
         temperature=s.llm_temperature,
         # Le contexte par défaut d'Ollama est trop court pour un CV + une offre complète.
         num_ctx=s.llm_num_ctx,
+        # Sans délai, un appel bloqué (mémoire saturée…) ferait attendre l'analyse indéfiniment.
+        client_kwargs={"timeout": s.llm_timeout},
     )
 
 

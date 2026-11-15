@@ -15,7 +15,7 @@ from getiajob.cv_text import detected_sections
 from getiajob.schemas import CVProfile, Experience
 from getiajob.services.cvs import (
     CVSummary,
-    analysis_status,
+    analysis_progress,
     delete_cv,
     get_cv_file,
     get_cv_text,
@@ -39,22 +39,52 @@ def _analyze(cv_id: int, force: bool = True) -> None:
     st.rerun()
 
 
+def _duration(seconds: float) -> str:
+    minutes = round(seconds / 60)
+    if seconds < 60:
+        return "moins d'1 min"
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes // 60} h {minutes % 60:02d}"
+
+
+STEP_ICONS = {
+    "done": ":material/check_circle:",
+    "failed": ":material/error:",
+    "running": ":material/progress_activity:",
+    "pending": ":material/radio_button_unchecked:",
+}
+
+
 @st.fragment(run_every=3)
 def _analysis_progress(cv_id: int) -> None:
-    """Rafraîchi toutes les 3 s tant que l'analyse tourne, puis recharge la page."""
-    status, _ = analysis_status(cv_id)
-    if status not in ("pending", "running"):
+    """Rafraîchi toutes les 3 s tant que l'analyse tourne (étapes, temps écoulé / restant)."""
+    prog = analysis_progress(cv_id)
+    if prog.status not in ("pending", "running"):
         st.rerun()
         return
-    label = (
-        "Analyse en file d'attente…"
-        if status == "pending"
-        else "Analyse du CV par l'IA, section par section (1 à 3 min)…"
-    )
-    st.info(
-        f"{label}  \nTu peux changer de page, d'onglet ou de fenêtre : l'analyse continue sur le serveur.",
-        icon=":material/hourglass_top:",
-    )
+    with st.container(border=True):
+        if prog.status == "pending":
+            st.markdown(":material/hourglass_top: **Analyse en file d'attente…**")
+        else:
+            current = " · ".join(prog.running) or "préparation"
+            st.progress(
+                prog.done / prog.total,
+                text=f"Analyse du CV par l'IA — étape {min(prog.done + 1, prog.total)}/{prog.total} : "
+                f"{current}",
+            )
+            times = []
+            if prog.elapsed_s is not None:
+                times.append(f":material/schedule: Écoulé : **{_duration(prog.elapsed_s)}**")
+            if prog.remaining_s is None:
+                times.append("Temps restant estimé après une première analyse complète")
+            elif prog.remaining_s > 0:
+                times.append(f":material/timer: Reste environ **{_duration(prog.remaining_s)}**")
+            else:
+                times.append(":material/timer: Plus long que d'habitude, bientôt terminé…")
+            st.markdown(" · ".join(times))
+            st.caption(" ".join(f"{STEP_ICONS[state]} {label}" for _, label, state in prog.steps))
+        st.caption("Tu peux changer de page, d'onglet ou de fenêtre : l'analyse continue sur le serveur.")
 
 
 # --------------------------------------------------------------------------- #
