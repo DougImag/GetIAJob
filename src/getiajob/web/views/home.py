@@ -320,7 +320,7 @@ def _mail_block() -> str:
         (
             "Retrouve les offres",
             "Elles sont importées, analysées et notées avec les autres lors de tes recherches "
-            "(source <b style=\"display:inline\">APEC</b>).",
+            '(source <b style="display:inline">APEC</b>).',
         ),
     ]
     cards = "".join(
@@ -334,7 +334,7 @@ def _mail_block() -> str:
         "<p>Tu reçois déjà des offres par mail ? Redirige-les vers GetIAJob pour qu'elles soient "
         "triées avec les autres.</p></div></div>"
         f'<div class="gj-mail-steps">{cards}</div>'
-        '<p class="gj-mail-note">Envoie-les <b>depuis l\'adresse de ton compte GetIAJob</b> : c\'est elle '
+        "<p class=\"gj-mail-note\">Envoie-les <b>depuis l'adresse de ton compte GetIAJob</b> : c'est elle "
         "qui permet de te rattacher les offres, visibles par toi seul. Les mails sont supprimés une fois "
         "traités.</p></div>"
     )

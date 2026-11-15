@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "getiajob"
-version = "0.12.0"
+version = "0.12.1"
 description = "Pipeline multi-agents (LangGraph + LLM open source) pour trouver rapidement les offres LinkedIn qui collent à un CV."
 readme = "README.md"
 requires-python = ">=3.11"

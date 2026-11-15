@@ -1,0 +1,24 @@
+# Surcharge de production (VPS) : image construite par GitHub Actions et publiée sur GHCR,
+# ports internes fermés au public (seul Caddy écoute sur 80/443).
+#
+# Sur le serveur, le fichier .env contient :
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+#   COMPOSE_PROFILES=prod
+# pour que toutes les commandes `docker compose` (déploiement, scripts cron) utilisent cette surcharge.
+# Nécessite Docker Compose ≥ 2.24 (balises !reset / !override).
+
+x-image: &image
+  image: ${GETIAJOB_IMAGE:-ghcr.io/dougimag/getiajob}:${GETIAJOB_TAG:-latest}
+  build: !reset null
+
+services:
+  db:
+    ports: !reset []
+
+  web:
+    <<: *image
+    ports: !override
+      - "127.0.0.1:${WEB_PORT:-8501}:8501"
+
+  app:
+    <<: *image

@@ -213,6 +213,43 @@ Le service **`proxy` (Caddy)** obtient automatiquement un certificat **HTTPS Let
 - prévois un serveur **Ollama avec GPU** (sur la même machine via le profil `ollama`, ou un serveur dédié) : en CPU, l'évaluation des offres est très lente ;
 - pour le SSO, monte `.streamlit/secrets.toml` dans le service `web` (ligne commentée dans `docker-compose.yml`) avec `redirect_uri = "https://ton-domaine/oauth2callback"`.
 
+### Déploiement continu (GitHub Actions → VPS)
+
+Le workflow `.github/workflows/ci-cd.yml` :
+
+1. **à chaque push et pull request** : `ruff check`, `ruff format --check`, `pytest` ;
+2. **sur `main`** : construit l'image (`target: runtime`) et la publie sur **GHCR** (`ghcr.io/<owner>/getiajob`, tags `latest` et SHA du commit) ;
+3. **déploie** par SSH : sur le VPS, `git reset --hard <sha>` (fichiers compose, Caddyfile, scripts), puis `deploy/deploy.sh <sha>` (`docker compose pull` + `up -d`, attente de l'état *healthy*, sinon échec du job avec les derniers journaux). La base (`pgdata`), `.env` et `data/` ne sont jamais touchés ; le schéma est mis à niveau au démarrage. Une recherche en cours au moment du déploiement est marquée en échec.
+
+`docker-compose.prod.yml` remplace la construction locale par l'image GHCR, ferme le port PostgreSQL et limite Streamlit à `127.0.0.1` (seul Caddy est exposé). Il est activé sur le serveur par deux lignes du `.env` : `COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml` et `COMPOSE_PROFILES=prod` — les scripts cron fonctionnent ainsi sans changement.
+
+**Mise en place (une fois)**
+
+```bash
+# Sur le VPS (Debian/Ubuntu), en root
+curl -fsSL https://get.docker.com | sh
+adduser --disabled-password --gecos "" deploy && usermod -aG docker deploy
+ufw allow OpenSSH && ufw allow 80,443/tcp && ufw enable
+mkdir -p /opt/getiajob && chown deploy: /opt/getiajob
+su - deploy -c "git clone https://github.com/<owner>/GetIAJob.git /opt/getiajob"
+# puis /opt/getiajob/.env (cf. .env.example) avec en plus :
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+#   COMPOSE_PROFILES=prod
+#   DOMAIN=getiajob.mondomaine.fr   PUBLIC_URL=https://getiajob.mondomaine.fr
+#   POSTGRES_PASSWORD=<fort>        OLLAMA_BASE_URL=<serveur Ollama>
+
+# Sur ton poste : clé dédiée au déploiement
+ssh-keygen -t ed25519 -f ~/.ssh/getiajob_deploy -C "github-actions-deploy" -N ""
+ssh-copy-id -i ~/.ssh/getiajob_deploy.pub deploy@<IP_VPS>
+ssh-keyscan -H <IP_VPS>      # → secret VPS_KNOWN_HOSTS
+```
+
+Dans GitHub, **Settings › Environments › New environment** `production`, puis ses secrets : `VPS_HOST`, `VPS_USER` (`deploy`), `VPS_SSH_KEY` (contenu de `~/.ssh/getiajob_deploy`), `VPS_KNOWN_HOSTS` ; variables facultatives `VPS_PORT`, `VPS_PATH`. Un enregistrement DNS **A** du domaine doit pointer vers le VPS (certificat Let's Encrypt obtenu par Caddy au premier démarrage).
+
+**Retour arrière** : sur le VPS, `deploy/deploy.sh <sha d'un commit précédent>` (ou relancer le workflow d'un ancien commit depuis l'onglet *Actions*).
+
+> Docker Compose ≥ 2.24 est requis sur le serveur (balises `!reset` / `!override`), ce qu'installe le script officiel `get.docker.com`.
+
 > **Streamlit Community Cloud** n'est pas adapté : l'application a besoin de PostgreSQL, d'Ollama et de tâches longues en arrière-plan.
 
 ## Configuration
@@ -327,6 +364,8 @@ getiajob/
 │   └── secrets.toml.example      # SSO OpenID Connect (optionnel)
 ├── config/preferences.yaml       # valeurs par défaut : recherche, attentes, tri
 ├── deploy/Caddyfile              # reverse proxy HTTPS (profil prod)
+├── deploy/deploy.sh              # déploiement sur le VPS (appelé par GitHub Actions)
+├── .github/workflows/ci-cd.yml   # lint, tests, image GHCR, déploiement
 ├── data/                         # CV et rapports de la CLI (ignorés par git)
 ├── src/getiajob/
 │   ├── cv_text.py                # lecture des CV : colonnes, ordre de lecture, titres de sections
@@ -366,6 +405,7 @@ getiajob/
 ├── tests/
 ├── Dockerfile                    # cibles `dev` et `runtime`
 ├── docker-compose.yml            # db, web, app (CLI), ollama (profil), proxy (profil prod)
+├── docker-compose.prod.yml       # surcharge de production (image GHCR, ports fermés)
 └── pyproject.toml
 ```
 
@@ -452,6 +492,11 @@ Tous les scripts passent par `scripts/cron-run.sh <journal> <commande>` (contene
 - [ ] Réinitialisation du mot de passe par email
 
 ## Journal des évolutions
+
+### 0.12.1 — 2026-11-15
+- **CI/CD GitHub Actions** (`.github/workflows/ci-cd.yml`) : lint + tests à chaque push / PR ; sur `main`, image publiée sur GHCR puis déploiement automatique sur le VPS par SSH, avec contrôle de santé.
+- `docker-compose.prod.yml` (image GHCR, ports PostgreSQL et Streamlit fermés au public) et `deploy/deploy.sh` (déploiement / retour arrière).
+- Formatage `ruff format` appliqué à `services/access.py` et `views/home.py`.
 
 ### 0.12.0 — 2026-11-15
 - **Adhésion sur invitation** (`INVITE_ONLY=true` par défaut) : la création de compte exige un code d'invitation à usage unique, lié à l'adresse invitée et valable `INVITATION_DAYS` jours (le premier compte d'une base vide en est dispensé ; en SSO, une invitation pour l'adresse suffit).

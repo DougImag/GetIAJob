@@ -181,9 +181,7 @@ def submit_request(full_name: str, email: str, message: str = "") -> None:
             existing.full_name, existing.message = full_name, message or existing.message
             return
         recent = session.scalar(
-            select(func.count(AccessRequest.id)).where(
-                AccessRequest.created_at >= now - timedelta(hours=1)
-            )
+            select(func.count(AccessRequest.id)).where(AccessRequest.created_at >= now - timedelta(hours=1))
         )
         if recent >= MAX_REQUESTS_PER_HOUR:
             raise AuthError("Beaucoup de demandes en ce moment : réessaie dans une heure.")
