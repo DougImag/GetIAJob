@@ -1,0 +1,92 @@
+# Configuration commune aux services applicatifs (CLI `app` et interface `web`)
+x-app: &app
+  build:
+    context: .
+    target: runtime
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-getiajob}:${POSTGRES_PASSWORD:-getiajob}@db:5432/${POSTGRES_DB:-getiajob}
+    OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-getiajob}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-getiajob}
+      POSTGRES_DB: ${POSTGRES_DB:-getiajob}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Interface web Streamlit : http://localhost:8501
+  web:
+    <<: *app
+    command: ["web"]
+    ports:
+      - "${WEB_PORT:-8501}:8501"
+    volumes:
+      - ./config:/app/config:ro
+      # SSO optionnel : décommenter après avoir créé .streamlit/secrets.toml
+      # - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # CLI : docker compose run --rm app <commande>
+  app:
+    <<: *app
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+
+  # Optionnel : `docker compose --profile ollama up -d ollama`
+  # (sur Mac, préférer Ollama natif pour profiter du GPU Apple Silicon)
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+  # Mise en ligne : reverse proxy HTTPS. `docker compose --profile prod up -d`
+  proxy:
+    image: caddy:2
+    profiles: ["prod"]
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  ollama:
+  caddy_data:
+  caddy_config:

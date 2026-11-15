@@ -1,0 +1,12 @@
+.git
+.venv
+.env
+.devcontainer
+data
+tests
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.streamlit/secrets.toml
+deploy

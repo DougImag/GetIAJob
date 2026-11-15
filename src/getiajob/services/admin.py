@@ -1,0 +1,114 @@
+"""Administration : liste des comptes, rôle administrateur, suppression d'un compte."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+from sqlalchemy import delete, func, select
+
+from getiajob.db import CVRecord, JobFeedback, SearchSession, User, session_scope
+from getiajob.services.monitoring import audit
+from getiajob.services.users import AuthError, SessionUser, _to_session_user
+
+
+@dataclass(frozen=True)
+class UserRow:
+    id: int
+    email: str
+    full_name: str | None
+    provider: str
+    is_admin: bool
+    created_at: datetime
+    last_login_at: datetime | None
+    n_cvs: int
+    n_searches: int
+    n_feedback: int
+
+    @property
+    def display_name(self) -> str:
+        return self.full_name or self.email.split("@")[0]
+
+
+def is_admin(user_id: int) -> bool:
+    """Rôle lu en base à chaque appel : un retrait de droits s'applique sans reconnexion."""
+    with session_scope() as session:
+        return bool(session.scalar(select(User.is_admin).where(User.id == user_id)))
+
+
+def _counts(session, model) -> dict[int, int]:
+    rows = session.execute(select(model.user_id, func.count()).group_by(model.user_id)).all()
+    return {user_id: n for user_id, n in rows if user_id is not None}
+
+
+def list_users() -> list[UserRow]:
+    with session_scope() as session:
+        cvs, searches, feedback = (_counts(session, m) for m in (CVRecord, SearchSession, JobFeedback))
+        users = session.scalars(select(User).order_by(User.created_at)).all()
+        return [
+            UserRow(
+                id=u.id,
+                email=u.email,
+                full_name=u.full_name,
+                provider=u.auth_provider,
+                is_admin=bool(u.is_admin),
+                created_at=u.created_at,
+                last_login_at=u.last_login_at,
+                n_cvs=cvs.get(u.id, 0),
+                n_searches=searches.get(u.id, 0),
+                n_feedback=feedback.get(u.id, 0),
+            )
+            for u in users
+        ]
+
+
+def _require_admin(session, actor_id: int) -> None:
+    if not session.scalar(select(User.is_admin).where(User.id == actor_id)):
+        raise AuthError("Action réservée aux administrateurs.")
+
+
+def set_admin(actor_id: int, user_id: int, value: bool) -> None:
+    """Donne ou retire le rôle administrateur. On ne peut pas modifier son propre rôle."""
+    if actor_id == user_id:
+        raise AuthError("Tu ne peux pas modifier ton propre rôle.")
+    with session_scope() as session:
+        _require_admin(session, actor_id)
+        user = session.get(User, user_id)
+        if user is None:
+            raise AuthError("Compte introuvable.")
+        user.is_admin = value
+        email = user.email
+    audit(actor_id, "user.admin_grant" if value else "user.admin_revoke", email)
+
+
+def delete_user(actor_id: int, user_id: int) -> None:
+    """Supprime un compte et toutes ses données (CV, fiche, recherches, avis, sessions)."""
+    if actor_id == user_id:
+        raise AuthError("Tu ne peux pas supprimer ton propre compte depuis l'administration.")
+    with session_scope() as session:
+        _require_admin(session, actor_id)
+        target = session.get(User, user_id)
+        if target is None:
+            raise AuthError("Compte introuvable.")
+        email = target.email
+        # Suppression SQL directe : les clés étrangères ON DELETE CASCADE emportent les données liées
+        session.execute(delete(User).where(User.id == user_id))
+    audit(actor_id, "user.delete", email)
+
+
+def impersonation_target(actor_id: int, user_id: int) -> SessionUser:
+    """Compte à consulter en lecture seule par un administrateur (tracé dans le journal d'audit)."""
+    if actor_id == user_id:
+        raise AuthError("C'est déjà ton compte.")
+    with session_scope() as session:
+        _require_admin(session, actor_id)
+        user = session.get(User, user_id)
+        if user is None:
+            raise AuthError("Compte introuvable.")
+        target = _to_session_user(user)
+    audit(actor_id, "user.impersonate", target.email, "consultation en lecture seule")
+    return target
+
+
+def end_impersonation(actor_id: int, target_email: str) -> None:
+    audit(actor_id, "user.impersonate_end", target_email)

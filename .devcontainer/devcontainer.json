@@ -1,0 +1,60 @@
+{
+  "name": "getiajob",
+  "dockerComposeFile": [
+    "../docker-compose.yml",
+    "docker-compose.devcontainer.yml"
+  ],
+  "service": "dev",
+  "runServices": [
+    "db",
+    "dev"
+  ],
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+  "postCreateCommand": "pip install -e '.[dev]' && getiajob init-db",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-azuretools.vscode-docker",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-pg",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.testing.pytestEnabled": true,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+          }
+        },
+        "sqltools.connections": [
+          {
+            "name": "getiajob",
+            "driver": "PostgreSQL",
+            "server": "db",
+            "port": 5432,
+            "database": "getiajob",
+            "username": "getiajob",
+            "password": "getiajob"
+          }
+        ]
+      }
+    }
+  },
+  "forwardPorts": [
+    8501
+  ],
+  "portsAttributes": {
+    "8501": {
+      "label": "getiajob web",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "postAttachCommand": "echo 'Interface web : getiajob web  →  http://localhost:8501'"
+}

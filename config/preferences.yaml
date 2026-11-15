@@ -1,0 +1,32 @@
+# Préférences de recherche et attentes — à adapter à ton besoin.
+# Ce fichier est relu à chaque exécution (pas besoin de reconstruire l'image Docker).
+
+search:
+  # Requêtes LinkedIn imposées. Laisse vide pour que l'agent les génère à partir du CV.
+  keywords: []
+  locations:
+    - "Île-de-France"
+    - "France"
+  # Valeurs possibles : on-site, remote, hybrid (vide = tous)
+  remote: [remote, hybrid]
+  # Valeurs possibles : internship, entry, associate, mid-senior, director, executive (vide = tous)
+  experience_levels: []
+  days: 7                    # offres publiées sur les N derniers jours
+  max_queries: 4             # nombre max de requêtes générées par l'agent
+  max_offers_per_query: 50   # par couple (requête, localisation)
+
+expectations:
+  # Texte libre transmis au LLM qui note les offres.
+  description: >
+    Je cherche un poste en CDI, idéalement en télétravail partiel, dans une entreprise
+    avec une vraie culture technique. Je privilégie les projets data / IA.
+  min_salary: null           # ex: 55000 (brut annuel)
+  contract_types: [CDI]
+  must_have_keywords: []     # filtre dur : l'offre doit contenir TOUS ces mots
+  exclude_keywords: [stage, alternance]   # filtre dur : l'offre est écartée si l'un apparaît
+  exclude_companies: []
+
+ranking:
+  prefilter_top_k: 30        # offres les plus proches (embeddings) envoyées au LLM
+  top_n: 10                  # offres présentées en sortie
+  llm_weight: 0.7            # score final = 0.7 × note LLM + 0.3 × similarité sémantique

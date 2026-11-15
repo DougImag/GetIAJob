@@ -1,0 +1,6 @@
+# Reverse proxy HTTPS (certificat Let's Encrypt automatique) devant Streamlit.
+# DOMAIN est défini dans .env (ex: getiajob.mondomaine.fr) ; "localhost" = certificat local.
+{$DOMAIN:localhost} {
+	encode gzip
+	reverse_proxy web:8501
+}

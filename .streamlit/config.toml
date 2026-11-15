@@ -1,0 +1,17 @@
+[server]
+headless = true
+maxUploadSize = 10          # Mo, suffisant pour un CV
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"     # masque le bouton « Deploy » et les menus développeur
+
+# Thèmes clair et sombre : le bouton soleil/lune du header bascule de l'un à l'autre
+[theme.light]
+primaryColor = "#4f46e5"
+
+[theme.dark]
+primaryColor = "#818cf8"

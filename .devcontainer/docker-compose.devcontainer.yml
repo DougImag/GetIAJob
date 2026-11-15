@@ -1,0 +1,21 @@
+# Surcharge utilisée par le devcontainer. Les chemins sont relatifs au premier fichier
+# compose (racine du projet).
+services:
+  dev:
+    build:
+      context: .
+      target: dev
+    command: sleep infinity
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-getiajob}:${POSTGRES_PASSWORD:-getiajob}@db:5432/${POSTGRES_DB:-getiajob}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      - .:/workspace:cached
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
