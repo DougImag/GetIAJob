@@ -221,7 +221,11 @@ Le workflow `.github/workflows/ci-cd.yml` :
 2. **sur `main`** : construit l'image (`target: runtime`) et la publie sur **GHCR** (`ghcr.io/<owner>/getiajob`, tags `latest` et SHA du commit) ;
 3. **déploie** par SSH : sur le VPS, `git reset --hard <sha>` (fichiers compose, Caddyfile, scripts), puis `deploy/deploy.sh <sha>` (`docker compose pull` + `up -d`, attente de l'état *healthy*, sinon échec du job avec les derniers journaux). La base (`pgdata`), `.env` et `data/` ne sont jamais touchés ; le schéma est mis à niveau au démarrage. Une recherche en cours au moment du déploiement est marquée en échec.
 
-`docker-compose.prod.yml` remplace la construction locale par l'image GHCR, ferme le port PostgreSQL et limite Streamlit à `127.0.0.1` (seul Caddy est exposé). Il est activé sur le serveur par deux lignes du `.env` : `COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml` et `COMPOSE_PROFILES=prod` — les scripts cron fonctionnent ainsi sans changement.
+`docker-compose.prod.yml` remplace la construction locale par l'image GHCR, ferme le port PostgreSQL et limite Streamlit à `127.0.0.1`. Il est activé sur le serveur par une ligne du `.env` : `COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml` — les scripts cron fonctionnent ainsi sans changement.
+
+**Proxy HTTPS**, au choix :
+- **Apache déjà présent sur le serveur** (sous-domaine d'un domaine existant) : modèle de VirtualHost `deploy/apache-getiajob.conf` (proxy HTTP + WebSocket vers `127.0.0.1:8501`, certificat par `certbot --apache`). Ne pas activer le profil `prod` : Caddy n'est pas lancé et les ports 80/443 restent à Apache ;
+- **Caddy fourni** (serveur dédié) : ajouter `COMPOSE_PROFILES=prod` et `DOMAIN=…` au `.env` ; `deploy.sh` démarre alors aussi le service `proxy`.
 
 **Mise en place (une fois)**
 
@@ -234,9 +238,16 @@ mkdir -p /opt/getiajob && chown deploy: /opt/getiajob
 su - deploy -c "git clone https://github.com/<owner>/GetIAJob.git /opt/getiajob"
 # puis /opt/getiajob/.env (cf. .env.example) avec en plus :
 #   COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
-#   COMPOSE_PROFILES=prod
-#   DOMAIN=getiajob.mondomaine.fr   PUBLIC_URL=https://getiajob.mondomaine.fr
+#   PUBLIC_URL=https://getiajob.mondomaine.fr
 #   POSTGRES_PASSWORD=<fort>        OLLAMA_BASE_URL=<serveur Ollama>
+#   (avec Caddy plutôt qu'Apache : COMPOSE_PROFILES=prod et DOMAIN=getiajob.mondomaine.fr)
+
+# Apache : sous-domaine en proxy vers Streamlit
+sudo a2enmod proxy proxy_http proxy_wstunnel headers rewrite ssl
+sudo cp /opt/getiajob/deploy/apache-getiajob.conf /etc/apache2/sites-available/getiajob.conf
+# (remplacer getiajob.mondomaine.fr par le sous-domaine dans ce fichier)
+sudo a2ensite getiajob && sudo apache2ctl configtest && sudo systemctl reload apache2
+sudo certbot --apache -d getiajob.mondomaine.fr
 
 # Sur ton poste : clé dédiée au déploiement
 ssh-keygen -t ed25519 -f ~/.ssh/getiajob_deploy -C "github-actions-deploy" -N ""
@@ -244,7 +255,7 @@ ssh-copy-id -i ~/.ssh/getiajob_deploy.pub deploy@<IP_VPS>
 ssh-keyscan -H <IP_VPS>      # → secret VPS_KNOWN_HOSTS
 ```
 
-Dans GitHub, **Settings › Environments › New environment** `production`, puis ses secrets : `VPS_HOST`, `VPS_USER` (`deploy`), `VPS_SSH_KEY` (contenu de `~/.ssh/getiajob_deploy`), `VPS_KNOWN_HOSTS` ; variables facultatives `VPS_PORT`, `VPS_PATH`. Un enregistrement DNS **A** du domaine doit pointer vers le VPS (certificat Let's Encrypt obtenu par Caddy au premier démarrage).
+Dans GitHub, **Settings › Environments › New environment** `production`, puis ses secrets : `VPS_HOST`, `VPS_USER` (`deploy`), `VPS_SSH_KEY` (contenu de `~/.ssh/getiajob_deploy`), `VPS_KNOWN_HOSTS` ; variables facultatives `VPS_PORT`, `VPS_PATH`. Un enregistrement DNS du sous-domaine (**A** vers l'IP du VPS, ou **CNAME** vers le domaine principal s'il est hébergé sur ce VPS) doit exister avant `certbot` (ou avant le premier démarrage de Caddy).
 
 **Retour arrière** : sur le VPS, `deploy/deploy.sh <sha d'un commit précédent>` (ou relancer le workflow d'un ancien commit depuis l'onglet *Actions*).
 
@@ -365,6 +376,7 @@ getiajob/
 ├── config/preferences.yaml       # valeurs par défaut : recherche, attentes, tri
 ├── deploy/Caddyfile              # reverse proxy HTTPS (profil prod)
 ├── deploy/deploy.sh              # déploiement sur le VPS (appelé par GitHub Actions)
+├── deploy/apache-getiajob.conf   # VirtualHost Apache (reverse proxy HTTPS + WebSocket)
 ├── .github/workflows/ci-cd.yml   # lint, tests, image GHCR, déploiement
 ├── data/                         # CV et rapports de la CLI (ignorés par git)
 ├── src/getiajob/
@@ -496,6 +508,7 @@ Tous les scripts passent par `scripts/cron-run.sh <journal> <commande>` (contene
 ### 0.12.1 — 2026-11-15
 - **CI/CD GitHub Actions** (`.github/workflows/ci-cd.yml`) : lint + tests à chaque push / PR ; sur `main`, image publiée sur GHCR puis déploiement automatique sur le VPS par SSH, avec contrôle de santé.
 - `docker-compose.prod.yml` (image GHCR, ports PostgreSQL et Streamlit fermés au public) et `deploy/deploy.sh` (déploiement / retour arrière).
+- Proxy HTTPS au choix : **Apache** existant (modèle `deploy/apache-getiajob.conf`, WebSocket compris, certificat par certbot) ou Caddy (profil `prod`, démarré par `deploy.sh` seulement s'il est actif).
 - Formatage `ruff format` appliqué à `services/access.py` et `views/home.py`.
 
 ### 0.12.0 — 2026-11-15

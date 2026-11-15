@@ -1,10 +1,11 @@
 # Surcharge de production (VPS) : image construite par GitHub Actions et publiée sur GHCR,
-# ports internes fermés au public (seul Caddy écoute sur 80/443).
+# ports internes fermés au public : Streamlit n'écoute que sur 127.0.0.1, derrière un proxy HTTPS.
 #
 # Sur le serveur, le fichier .env contient :
 #   COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
-#   COMPOSE_PROFILES=prod
 # pour que toutes les commandes `docker compose` (déploiement, scripts cron) utilisent cette surcharge.
+# Proxy HTTPS : Apache déjà installé sur le serveur (deploy/apache-getiajob.conf), ou Caddy fourni
+# (service « proxy ») en ajoutant COMPOSE_PROFILES=prod.
 # Nécessite Docker Compose ≥ 2.24 (balises !reset / !override).
 
 x-image: &image

@@ -2,9 +2,10 @@
 # Déploiement sur le VPS, lancé par GitHub Actions (ou à la main) depuis le dossier du projet :
 #   deploy/deploy.sh [tag]        tag de l'image GHCR (défaut : latest)
 #
-# Pré-requis : .env contenant COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml et
-# COMPOSE_PROFILES=prod (cf. docker-compose.prod.yml). La base et les données ne sont pas touchées ;
-# les mises à niveau du schéma sont appliquées au démarrage de l'application.
+# Pré-requis : .env contenant COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml (et
+# COMPOSE_PROFILES=prod seulement si Caddy sert de proxy HTTPS ; cf. docker-compose.prod.yml).
+# La base et les données ne sont pas touchées ; les mises à niveau du schéma sont appliquées au
+# démarrage de l'application.
 set -eu
 
 TAG="${1:-latest}"
@@ -15,7 +16,14 @@ echo "→ Récupération de l'image ($TAG)"
 docker compose pull web app
 
 echo "→ Redémarrage des services"
-docker compose up -d --remove-orphans db web proxy
+# Caddy (service « proxy ») seulement si le profil prod est actif (COMPOSE_PROFILES=prod) ;
+# derrière un Apache/Nginx déjà installé sur le serveur, on ne lance que db et web.
+services="db web"
+if docker compose config --services | grep -qx proxy; then
+    services="$services proxy"
+fi
+# shellcheck disable=SC2086
+docker compose up -d --remove-orphans $services
 
 echo "→ Attente de l'application"
 container="$(docker compose ps -q web)"
