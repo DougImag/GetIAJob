@@ -22,7 +22,7 @@ from sqlalchemy import delete, select
 from getiajob.config import get_settings
 from getiajob.cv_text import extract_cv_text
 from getiajob.db import CVRecord, JobMatch, session_scope
-from getiajob.llm import get_chat_model, get_embeddings
+from getiajob.llm import get_embeddings, structured
 from getiajob.schemas import (
     CVProfile,
     EducationExtraction,
@@ -129,7 +129,7 @@ def _run_task(name: str, text: str, progress: Progress = _noop) -> BaseModel | N
     # Le CV vient AVANT la consigne : les 5 extractions partagent ainsi le même début de prompt, qu'Ollama
     # garde en cache (le CV n'est lu qu'une fois au lieu de 5 — gros gain sans GPU, avec LLM_CONCURRENCY=1).
     schema, instruction = TASKS[name]
-    llm = get_chat_model().with_structured_output(schema)
+    llm = structured(schema)
     progress(name, "running")
     try:
         with timed("llm", f"cv_{name}"):
@@ -304,21 +304,17 @@ def extract_profile(text: str, progress: Progress = _noop) -> CVProfile:
     _ground_lists(profile, text_norm)
     _contact_fallback(profile, text)
 
-    structured = profile.model_dump(
+    sections = profile.model_dump(
         include={"headline", "summary", "experiences", "education", "projects", "skills", "languages"}
     )
     progress("synthesis", "running")
     try:
         with timed("llm", "cv_synthese"):
-            synthesis: ProfileSynthesis = (
-                get_chat_model()
-                .with_structured_output(ProfileSynthesis)
-                .invoke(
-                    [
-                        ("system", SYNTHESIS_PROMPT),
-                        ("human", json.dumps(structured, ensure_ascii=False, indent=1)),
-                    ]
-                )
+            synthesis: ProfileSynthesis = structured(ProfileSynthesis).invoke(
+                [
+                    ("system", SYNTHESIS_PROMPT),
+                    ("human", json.dumps(sections, ensure_ascii=False, indent=1)),
+                ]
             )
     except Exception as exc:
         log.warning("Synthèse du profil impossible : %s", exc)
