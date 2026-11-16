@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.0
     llm_num_ctx: int = 8192
     llm_concurrency: int = 2  # appels LLM simultanés (analyse du CV) ; cf. OLLAMA_NUM_PARALLEL
-    llm_max_tokens: int = 3072  # longueur max d'une réponse du LLM (borne un appel parti en boucle)
+    llm_max_tokens: int = 6144  # longueur max d'une réponse du LLM (borne un appel parti en boucle)
     llm_timeout: int = 900  # secondes max par appel au LLM (évite une analyse bloquée indéfiniment)
     embedding_model: str = "nomic-embed-text"
     embedding_dim: int = 768
