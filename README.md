@@ -510,6 +510,8 @@ Tous les scripts passent par `scripts/cron-run.sh <journal> <commande>` (contene
 - **Suivi de l'analyse du CV** : barre de progression par étape (Identité, Expériences, Formation, Projets, Compétences, Synthèse, Indexation), étapes en cours / terminées / en échec, **temps écoulé** et **temps restant estimé** à partir des durées des dernières analyses (colonne `cv_profiles.analysis_progress`, ajoutée automatiquement).
 - **`LLM_TIMEOUT`** (900 s par défaut) : un appel au LLM bloqué (mémoire saturée…) échoue au lieu de faire attendre l'analyse indéfiniment.
 - Menu latéral : modèles Ollama affichés sur deux lignes.
+- L'analyse d'un CV ne garde plus de connexion à la base pendant les appels au LLM (évite d'épuiser le pool de connexions — « QueuePool limit … reached » — quand le serveur est lent).
+- Analyse d'un CV plus rapide : le texte du CV est placé avant la consigne de chaque extraction, si bien qu'Ollama le garde en cache et ne le relit qu'une fois au lieu de cinq (gain surtout sans GPU, avec `LLM_CONCURRENCY=1`).
 
 ### 0.12.1 — 2026-11-15
 - **CI/CD GitHub Actions** (`.github/workflows/ci-cd.yml`) : lint + tests à chaque push / PR ; sur `main`, image publiée sur GHCR puis déploiement automatique sur le VPS par SSH, avec contrôle de santé.
