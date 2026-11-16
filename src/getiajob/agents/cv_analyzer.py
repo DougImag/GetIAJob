@@ -126,13 +126,15 @@ def extract_text(data: bytes, file_name: str) -> str:
 
 
 def _run_task(name: str, text: str, progress: Progress = _noop) -> BaseModel | None:
+    # Le CV vient AVANT la consigne : les 5 extractions partagent ainsi le même début de prompt, qu'Ollama
+    # garde en cache (le CV n'est lu qu'une fois au lieu de 5 — gros gain sans GPU, avec LLM_CONCURRENCY=1).
     schema, instruction = TASKS[name]
     llm = get_chat_model().with_structured_output(schema)
     progress(name, "running")
     try:
         with timed("llm", f"cv_{name}"):
             result = llm.invoke(
-                [("system", f"{COMMON_RULES}\n\n{instruction}"), ("human", f"Texte du CV :\n\n{text}")]
+                [("system", f"{COMMON_RULES}\n\nTexte du CV :\n\n{text}"), ("human", instruction)]
             )
     except Exception as exc:  # une section ratée ne doit pas faire échouer toute l'analyse
         log.warning("Extraction « %s » impossible : %s", name, exc)
@@ -357,7 +359,11 @@ def save_cv(data: bytes, file_name: str, user_id: int | None = None) -> int:
 
 
 def ensure_profile(cv_id: int, *, force: bool = False, progress: Progress = _noop) -> CVProfile:
-    """Renvoie le profil du CV ; l'(ré)extrait s'il manque, s'il est obsolète ou si force."""
+    """Renvoie le profil du CV ; l'(ré)extrait s'il manque, s'il est obsolète ou si force.
+
+    Aucune connexion à la base n'est gardée pendant les appels au LLM (plusieurs minutes sans GPU) :
+    lecture du CV, puis extraction hors transaction, puis enregistrement dans une nouvelle session.
+    """
     with session_scope() as session:
         record = session.get(CVRecord, cv_id)
         if record is None:
@@ -368,28 +374,35 @@ def ensure_profile(cv_id: int, *, force: bool = False, progress: Progress = _noo
                 log.info("CV déjà analysé (id=%s), réutilisation du profil.", cv_id)
                 return current
             log.info("Profil du CV %s obsolète (schéma v%s) : ré-analyse.", cv_id, current.schema_version)
+        file_name = record.file_name
+        # Le texte est ré-extrait avec la version courante du parseur
+        raw_text = extract_text(record.file_data, file_name) if record.file_data else record.raw_text
 
-        if record.file_data:  # le texte est ré-extrait avec la version courante du parseur
-            record.raw_text = extract_text(record.file_data, record.file_name)
+    log.info("Analyse du CV %s avec le LLM (par sections)…", file_name)
+    profile = extract_profile(raw_text, progress)
+    progress("embedding", "running")
+    with timed("embedding", "cv"):
+        embedding = get_embeddings().embed_query(profile.to_text())
+    progress("embedding", "done")
 
-        log.info("Analyse du CV %s avec le LLM (par sections)…", record.file_name)
-        profile = extract_profile(record.raw_text, progress)
+    with session_scope() as session:
+        record = session.get(CVRecord, cv_id)
+        if record is None:  # supprimé pendant l'analyse
+            raise ValueError(f"CV {cv_id} supprimé pendant l'analyse")
+        record.raw_text = raw_text
         record.profile = profile.model_dump(mode="json")
-        progress("embedding", "running")
-        with timed("embedding", "cv"):
-            record.embedding = get_embeddings().embed_query(profile.to_text())
-        progress("embedding", "done")
+        record.embedding = embedding
         # Les évaluations d'offres reposaient sur l'ancien profil : elles seront recalculées.
         session.execute(delete(JobMatch).where(JobMatch.cv_id == cv_id))
-        log.info(
-            "Profil extrait : %s — %d expériences, %d formations, %d projets, %d compétences",
-            profile.headline,
-            len(profile.experiences),
-            len(profile.education),
-            len(profile.projects),
-            len(profile.hard_skills),
-        )
-        return profile
+    log.info(
+        "Profil extrait : %s — %d expériences, %d formations, %d projets, %d compétences",
+        profile.headline,
+        len(profile.experiences),
+        len(profile.education),
+        len(profile.projects),
+        len(profile.hard_skills),
+    )
+    return profile
 
 
 def analyze_cv(path: Path, *, force: bool = False) -> tuple[int, CVProfile]:
