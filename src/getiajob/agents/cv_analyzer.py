@@ -126,15 +126,15 @@ def extract_text(data: bytes, file_name: str) -> str:
 
 
 def _run_task(name: str, text: str, progress: Progress = _noop) -> BaseModel | None:
-    # Le CV vient AVANT la consigne : les 5 extractions partagent ainsi le même début de prompt, qu'Ollama
-    # garde en cache (le CV n'est lu qu'une fois au lieu de 5 — gros gain sans GPU, avec LLM_CONCURRENCY=1).
+    # La consigne vient AVANT le CV : placer le CV en tête (pour le cache de prompt d'Ollama) fait perdre
+    # des expériences et les dates (mesuré : 7 expériences sans dates au lieu de 12 avec qwen2.5:7b).
     schema, instruction = TASKS[name]
     llm = structured(schema)
     progress(name, "running")
     try:
         with timed("llm", f"cv_{name}"):
             result = llm.invoke(
-                [("system", f"{COMMON_RULES}\n\nTexte du CV :\n\n{text}"), ("human", instruction)]
+                [("system", f"{COMMON_RULES}\n\n{instruction}"), ("human", f"Texte du CV :\n\n{text}")]
             )
     except Exception as exc:  # une section ratée ne doit pas faire échouer toute l'analyse
         log.warning("Extraction « %s » impossible : %s", name, exc)

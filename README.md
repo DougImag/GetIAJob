@@ -271,7 +271,7 @@ Dans GitHub, **Settings › Environments › New environment** `production`, pui
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | URL d'Ollama |
 | `LLM_TIMEOUT` | `900` | Durée maximale (s) d'un appel au LLM ; au-delà, l'étape est abandonnée |
-| `LLM_MAX_TOKENS` | `3072` | Longueur maximale d'une réponse du LLM (borne la durée d'un appel parti en boucle) |
+| `LLM_MAX_TOKENS` | `6144` | Longueur maximale d'une réponse du LLM (borne la durée d'un appel parti en boucle) |
 | `LLM_MODEL` | `qwen2.5:7b` | Modèle de chat (ex. `llama3.1:8b`, `mistral-nemo`, `qwen2.5:14b`) |
 | `LLM_NUM_CTX` | `8192` | Fenêtre de contexte envoyée à Ollama (le défaut d'Ollama tronque les CV/offres longs) |
 | `LLM_CONCURRENCY` | `2` | Appels LLM simultanés lors de l'analyse d'un CV (à aligner sur `OLLAMA_NUM_PARALLEL`) |
@@ -512,8 +512,7 @@ Tous les scripts passent par `scripts/cron-run.sh <journal> <commande>` (contene
 - **`LLM_TIMEOUT`** (900 s par défaut) : un appel au LLM bloqué (mémoire saturée…) échoue au lieu de faire attendre l'analyse indéfiniment.
 - Menu latéral : modèles Ollama affichés sur deux lignes.
 - L'analyse d'un CV ne garde plus de connexion à la base pendant les appels au LLM (évite d'épuiser le pool de connexions — « QueuePool limit … reached » — quand le serveur est lent).
-- Analyse d'un CV plus rapide : le texte du CV est placé avant la consigne de chaque extraction, si bien qu'Ollama le garde en cache et ne le relit qu'une fois au lieu de cinq (gain surtout sans GPU, avec `LLM_CONCURRENCY=1`).
-- Correction d'une analyse interminable (jusqu'à 40 min sans GPU) : un petit modèle pouvait boucler indéfiniment dans une liste (« Oracle, JAVA, Oracle, JAVA… »). Les réponses structurées ont désormais au plus 30 éléments par liste (imposé à Ollama par le schéma) et une longueur plafonnée par **`LLM_MAX_TOKENS`** (3 072). S'applique aussi au classement des offres et au plan de recherche.
+- Correction d'une analyse interminable (jusqu'à 40 min sans GPU) : un petit modèle pouvait boucler indéfiniment dans une liste (« Oracle, JAVA, Oracle, JAVA… »). Les réponses structurées ont désormais au plus 30 éléments par liste (imposé à Ollama par le schéma) et une longueur plafonnée par **`LLM_MAX_TOKENS`** (6 144 ; un CV avec une douzaine d'expériences en produit déjà ~4 600). S'applique aussi au classement des offres et au plan de recherche.
 - Correction de sections vides avec un petit modèle (`qwen2.5:3b`) : il répondait souvent `{}`, d'où des formations ou des langues manquantes. Les clés principales de chaque réponse sont désormais obligatoires dans le schéma transmis à Ollama.
 
 ### 0.12.1 — 2026-11-15
