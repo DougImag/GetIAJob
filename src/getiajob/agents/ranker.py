@@ -19,7 +19,7 @@ from getiajob.config import (
     preferences_from_state,
 )
 from getiajob.db import CVRecord, JobMatch, JobOffer, session_scope
-from getiajob.llm import get_chat_model, get_embeddings
+from getiajob.llm import get_embeddings, structured
 from getiajob.schemas import CVProfile, JobAssessment
 from getiajob.services.feedback import feedback_adjustment
 from getiajob.services.monitoring import record, timed
@@ -118,7 +118,7 @@ def assess_job(profile: CVProfile, exp: Expectations, job: JobOffer) -> JobAsses
         f"Salaire : {job.salary or 'non précisé'}\nCritères : {criteria or 'n/a'}\n\n"
         f"Description :\n{(job.description or '')[:6000]}"
     )
-    llm = get_chat_model().with_structured_output(JobAssessment)
+    llm = structured(JobAssessment)
     with timed("llm", "evaluation"):
         return llm.invoke(
             [

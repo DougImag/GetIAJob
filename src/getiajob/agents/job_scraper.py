@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from getiajob.config import Preferences, get_settings, preferences_from_state
 from getiajob.db import CVRecord, JobMatch, JobOffer, session_scope
-from getiajob.llm import get_chat_model
+from getiajob.llm import structured
 from getiajob.schemas import CVProfile, SearchPlan
 from getiajob.scraping.adzuna import AdzunaSource
 from getiajob.scraping.base import (
@@ -41,7 +41,7 @@ def plan_queries(profile: CVProfile, prefs: Preferences) -> list[str]:
     if prefs.search.keywords:
         return prefs.search.keywords
 
-    llm = get_chat_model().with_structured_output(SearchPlan)
+    llm = structured(SearchPlan)
     with timed("llm", "plan_requetes"):
         plan: SearchPlan = llm.invoke(
             [
