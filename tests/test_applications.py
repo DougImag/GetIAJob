@@ -67,3 +67,14 @@ def test_stage_follows_status():
         2,
         3,
     ]
+
+
+def test_result_card_shows_application_status():
+    from datetime import date as _date
+
+    from getiajob.services.applications import AppliedMark
+    from getiajob.web.views.results import applied_label
+
+    assert applied_label(AppliedMark(1, _date(2026, 11, 18), "applied")) == "Postulé le 18/11/2026"
+    assert applied_label(AppliedMark(1, _date(2026, 11, 18), "withdrawn")) == "Abandonnée"
+    assert applied_label(AppliedMark(1, _date(2026, 11, 18), "interview")) == "Entretiens en cours"

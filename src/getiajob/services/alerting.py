@@ -334,13 +334,15 @@ def _smtp_settings() -> tuple[str, int, str, str]:
     return host, s.smtp_port, user, password
 
 
-def send_mail(to: list[str], subject: str, body: str) -> None:
+def send_mail(to: list[str], subject: str, body: str, html: str | None = None) -> None:
     host, port, user, password = _smtp_settings()
     msg = EmailMessage()
     msg["From"] = f"GetIAJob <{user}>"
     msg["To"] = ", ".join(to)
     msg["Subject"] = subject
     msg.set_content(body)
+    if html:
+        msg.add_alternative(html, subtype="html")
     context = ssl.create_default_context()
     if port == 465:
         with smtplib.SMTP_SSL(host, port, context=context, timeout=30) as smtp:

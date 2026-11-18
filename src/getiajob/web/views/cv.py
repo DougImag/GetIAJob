@@ -11,6 +11,8 @@ from html import escape
 import streamlit as st
 
 from getiajob.agents.cv_analyzer import SUPPORTED_EXTENSIONS, save_cv
+from getiajob.cv_pdf import file_name as cv_pdf_name
+from getiajob.cv_pdf import render_cv_pdf
 from getiajob.cv_text import detected_sections
 from getiajob.schemas import CVProfile, Experience
 from getiajob.services.cvs import (
@@ -470,11 +472,7 @@ def _projects(p: CVProfile) -> None:
 
 def _merged_skills(p: CVProfile) -> list[tuple[str, list[str]]]:
     """L'extraction section par section peut produire deux fois la même catégorie : on les fusionne."""
-    groups: dict[str, tuple[str, list[str]]] = {}
-    for g in p.skills:
-        _, items = groups.setdefault(g.category.strip().lower(), (g.category.strip(), []))
-        items += [i for i in g.items if i.strip() and i.strip().lower() not in {x.lower() for x in items}]
-    return [(name, items) for name, items in groups.values() if items]
+    return p.merged_skills()
 
 
 def _skills(p: CVProfile) -> None:
@@ -582,6 +580,18 @@ def _cv_card(user_id: int, cv: CVSummary, is_current: bool) -> None:
                     icon=":material/download:",
                     key=f"dl-{cv.id}",
                     help="Télécharger",
+                )
+            if cv.profile is not None and not cv.profile.is_outdated:
+                profile = cv.profile
+                st.download_button(
+                    "",
+                    data=lambda: render_cv_pdf(profile),  # généré seulement au clic
+                    file_name=cv_pdf_name(profile),
+                    mime="application/pdf",
+                    icon=":material/picture_as_pdf:",
+                    key=f"pdf-{cv.id}",
+                    help="Générer un CV au format PDF à partir des informations ci-dessous",
+                    on_click="ignore",
                 )
             if cv.profile is not None and cv.profile.edited_at:
                 # Profil corrigé à la main : la ré-analyse écraserait les corrections → confirmation

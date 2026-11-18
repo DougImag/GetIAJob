@@ -140,7 +140,7 @@ class Expectations(BaseModel):
 
 class RankingPreferences(BaseModel):
     prefilter_top_k: int = Field(default=30, ge=1, description="Offres envoyées au LLM après tri sémantique")
-    top_n: int = Field(default=10, ge=1)
+    top_n: int = Field(default=20, ge=1)
     llm_weight: float = Field(default=0.7, ge=0, le=1)
     # Avis de l'utilisateur (figés à la création de la recherche) : aucun appel LLM supplémentaire
     hidden_job_ids: list[int] = Field(default_factory=list, description="Offres écartées : exclues")

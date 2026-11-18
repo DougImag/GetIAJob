@@ -122,6 +122,8 @@ UPGRADES = [
     "ALTER TABLE job_applications ADD COLUMN IF NOT EXISTS summary TEXT",
     # v0.12.2 : avancement détaillé de l'analyse du CV (étapes, estimation du temps restant)
     "ALTER TABLE cv_profiles ADD COLUMN IF NOT EXISTS analysis_progress JSONB",
+    # v0.12.3 : options du formulaire de recherche mémorisées
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS search_options JSONB",
 ]
 
 

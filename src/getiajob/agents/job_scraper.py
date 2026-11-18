@@ -24,6 +24,7 @@ from getiajob.scraping.base import (
 )
 from getiajob.scraping.francetravail import FranceTravailSource
 from getiajob.scraping.linkedin import LinkedInSource
+from getiajob.seniority import level_prompt, max_years
 from getiajob.services.monitoring import record, timed
 
 log = logging.getLogger(__name__)
@@ -34,13 +35,17 @@ PLANNER_PROMPT = """Tu es chasseur de têtes. À partir du profil d'un candidat 
 propose des requêtes de recherche d'emploi courtes (2 à 4 mots, pas d'opérateurs booléens),
 utilisables sur LinkedIn, France Travail et Adzuna, dans la langue du marché visé,
 de la plus pertinente à la moins pertinente.
-Varie les intitulés (synonymes, variantes anglaises courantes) sans t'éloigner du profil."""
+Varie les intitulés (synonymes, variantes anglaises courantes) sans t'éloigner du profil.
+Si un niveau débutant ou junior est visé, n'utilise aucun intitulé senior (senior, lead, expert,
+confirmé…) et ajoute au moins une requête précisant le niveau (ex. « ingénieur IA junior »)."""
 
 
 def plan_queries(profile: CVProfile, prefs: Preferences) -> list[str]:
     if prefs.search.keywords:
         return prefs.search.keywords
 
+    levels = prefs.search.experience_levels
+    level = f"Niveau visé : {level_prompt(levels)}\n" if levels and max_years(levels) is not None else ""
     llm = structured(SearchPlan)
     with timed("llm", "plan_requetes"):
         plan: SearchPlan = llm.invoke(
@@ -48,7 +53,8 @@ def plan_queries(profile: CVProfile, prefs: Preferences) -> list[str]:
                 ("system", PLANNER_PROMPT),
                 (
                     "human",
-                    f"Profil :\n{profile.to_text()}\n\nAttentes :\n{prefs.expectations.to_prompt()}\n\n"
+                    f"Profil :\n{profile.to_text()}\n\n"
+                    f"Attentes :\n{level}{prefs.expectations.to_prompt()}\n\n"
                     f"Donne au plus {prefs.search.max_queries} requêtes.",
                 ),
             ]

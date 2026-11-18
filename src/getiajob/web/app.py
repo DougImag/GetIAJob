@@ -42,7 +42,7 @@ except Exception as exc:  # base injoignable : message clair plutôt qu'une trac
 state.restore_session()
 state.sync_oidc_user()
 user = state.sync_admin_flag()
-read_only = state.apply_read_only()
+state.apply_read_only()
 
 # clé: (vue, titre, icône, url)
 PAGE_SPECS = {
@@ -103,7 +103,7 @@ state.register_pages(pages)
 current = st.navigation(navigation, position="sidebar" if user else "hidden")
 state.pending_goto()
 layout.header(current.title, user)
-if read_only:
+if state.impersonator() is not None:  # lecture seule ou mode édition
     layout.impersonation_banner(user, state.impersonator())
 if user:
     layout.sidebar_footer()

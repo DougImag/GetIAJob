@@ -28,5 +28,5 @@ expectations:
 
 ranking:
   prefilter_top_k: 30        # offres les plus proches (embeddings) envoyées au LLM
-  top_n: 10                  # offres présentées en sortie
+  top_n: 20                  # offres présentées en sortie
   llm_weight: 0.7            # score final = 0.7 × note LLM + 0.3 × similarité sémantique

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
 
 from getiajob.config import Expectations, Preferences, RankingPreferences, load_preferences
-from getiajob.db import SearchSession, session_scope
+from getiajob.db import SearchSession, UserProfile, session_scope
 from getiajob.services.cvs import owns_cv
 from getiajob.services.feedback import FeedbackSignals, feedback_signals
 from getiajob.services.users import ProfileData
@@ -35,7 +35,7 @@ class SearchOptions:
     """Paramètres saisis dans le formulaire « Nouvelle recherche »."""
 
     max_age_days: int = 7  # fraîcheur des annonces
-    top_n: int = 10
+    top_n: int = 20
     keywords: list[str] = field(default_factory=list)
     locations: list[str] = field(default_factory=list)
     remote: list[str] = field(default_factory=list)
@@ -48,6 +48,33 @@ class SearchOptions:
     exclude_keywords: list[str] = field(default_factory=list)
     exclude_companies: list[str] = field(default_factory=list)
     sources: list[str] | None = None  # None = celles de la fiche
+
+
+# Valeurs du formulaire mémorisées en plus des SearchOptions. « Ne pas interroger les sites » et
+# « Ré-évaluer toutes les offres » n'en font pas partie : ce sont des actions ponctuelles.
+FORM_EXTRAS = ("cv_id", "use_feedback", "feedback_llm")
+
+
+def load_search_form(user_id: int) -> dict:
+    """Dernières valeurs du formulaire « Nouvelle recherche » ({} si aucune)."""
+    with session_scope() as session:
+        row = session.get(UserProfile, user_id)
+        return dict(row.search_options or {}) if row else {}
+
+
+def save_search_form(user_id: int, opts: SearchOptions, **extras) -> None:
+    """Mémorise les valeurs du formulaire pour les proposer à la recherche suivante."""
+    values = asdict(opts) | {k: v for k, v in extras.items() if k in FORM_EXTRAS}
+    with session_scope() as session:
+        row = session.get(UserProfile, user_id) or UserProfile(user_id=user_id)
+        row.search_options = values
+        session.add(row)
+
+
+def reset_search_form(user_id: int) -> None:
+    with session_scope() as session:
+        if row := session.get(UserProfile, user_id):
+            row.search_options = None
 
 
 def clamp_days(days: int) -> int:

@@ -11,7 +11,12 @@ import streamlit.components.v1 as components
 
 from getiajob.config import get_settings
 from getiajob.db import READ_ONLY
-from getiajob.services.admin import end_impersonation, impersonation_target, is_admin
+from getiajob.services.admin import (
+    end_impersonation,
+    impersonation_target,
+    impersonation_write_mode,
+    is_admin,
+)
 from getiajob.services.runner import BackgroundRunner
 from getiajob.services.users import (
     AuthError,
@@ -30,6 +35,7 @@ COOKIE_OP_KEY = "_cookie_op"
 COOKIE_NAME = "getiajob_session"
 OPEN_SIDEBAR_KEY = "_open_sidebar"
 IMPERSONATOR_KEY = "_impersonator"  # administrateur qui consulte le compte courant en lecture seule
+WRITE_MODE_KEY = "_impersonation_write"  # consultation avec modifications autorisées (mode édition)
 
 
 @st.cache_resource(show_spinner="Initialisation…")
@@ -111,7 +117,25 @@ _KEEP_KEYS = {TOKEN_KEY, PAGES_KEY}
 
 
 def is_read_only() -> bool:
-    return impersonator() is not None
+    return impersonator() is not None and not is_write_mode()
+
+
+def is_write_mode() -> bool:
+    """L'administrateur agit sur le compte consulté comme s'il était l'utilisateur."""
+    return impersonator() is not None and bool(st.session_state.get(WRITE_MODE_KEY))
+
+
+def set_write_mode(enabled: bool) -> None:
+    """Bascule la consultation entre lecture seule et mode édition (vérifié et tracé)."""
+    admin, target = impersonator(), current_user()
+    if admin is None or target is None or enabled == is_write_mode():
+        return
+    try:
+        impersonation_write_mode(admin.id, target.email, enabled)
+    except AuthError:
+        enabled = False
+    st.session_state[WRITE_MODE_KEY] = enabled
+    READ_ONLY.set(not enabled)
 
 
 def impersonator() -> SessionUser | None:
@@ -119,8 +143,12 @@ def impersonator() -> SessionUser | None:
 
 
 def apply_read_only() -> bool:
-    """À appeler à chaque exécution : interdit toute écriture en base pendant une consultation."""
-    read_only = impersonator() is not None
+    """À appeler à chaque exécution : interdit toute écriture en base pendant une consultation,
+    sauf en mode édition (et seulement tant que l'administrateur a toujours ce rôle)."""
+    admin = impersonator()
+    if is_write_mode() and admin is not None and not is_admin(admin.id):
+        st.session_state[WRITE_MODE_KEY] = False
+    read_only = is_read_only()
     READ_ONLY.set(read_only)
     return read_only
 
@@ -146,6 +174,7 @@ def start_impersonation(admin: SessionUser, user_id: int) -> SessionUser:
 def stop_impersonation() -> None:
     """Revient au compte de l'administrateur."""
     admin = st.session_state.pop(IMPERSONATOR_KEY, None)
+    st.session_state.pop(WRITE_MODE_KEY, None)
     READ_ONLY.set(False)
     if admin is None:
         return

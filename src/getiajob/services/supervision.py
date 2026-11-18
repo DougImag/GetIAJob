@@ -591,6 +591,8 @@ AUDIT_LABELS = {
     "user.delete": "Compte supprimé",
     "user.impersonate": "Consultation d'un compte (lecture seule)",
     "user.impersonate_end": "Fin de consultation d'un compte",
+    "user.impersonate_write": "Consultation : mode édition activé",
+    "user.impersonate_readonly": "Consultation : retour en lecture seule",
     "search.cancel": "Recherche arrêtée",
     "search.retry": "Recherche relancée",
     "offers.purge": "Offres purgées",

@@ -11,7 +11,7 @@ import streamlit.components.v1 as components
 from getiajob.config import get_settings
 from getiajob.scraping.base import ALL_SOURCES, SOURCE_LABELS, configured_sources
 from getiajob.services.users import SessionUser
-from getiajob.web.state import go, sign_out
+from getiajob.web.state import go, impersonator, is_write_mode, set_write_mode, sign_out
 
 REMOTE_LABELS = {"on-site": "Sur site", "hybrid": "Hybride", "remote": "Télétravail"}
 EXPERIENCE_LABELS = {
@@ -57,6 +57,20 @@ CSS = """
   }
   .st-key-gj_impersonation { background: rgba(245, 158, 11, .12);
     border-color: rgba(245, 158, 11, .6) !important; }
+  .st-key-gj_impersonation:has(.gj-write-mode) {
+    background: rgba(220, 38, 38, .10); border-color: rgba(220, 38, 38, .6) !important; }
+  /* Bascule lecture seule / mode édition (consultation d'un compte) : pastille dans le header */
+  .st-key-gj_write_toggle { padding: .2rem .75rem .2rem .55rem; border-radius: 999px;
+    background: rgba(255, 255, 255, .16); border: 1px solid rgba(255, 255, 255, .35);
+    transition: background .2s ease, border-color .2s ease; }
+  .st-key-gj_write_toggle:has(input:checked) { background: #dc2626; border-color: #fecaca; }
+  .st-key-gj_write_toggle label { gap: .45rem; margin: 0; }
+  .st-key-gj_write_toggle label p { color: #fff !important; font-weight: 600; font-size: .82rem;
+    white-space: nowrap; }
+  .st-key-gj_write_toggle label > span + div { background: rgba(255, 255, 255, .35) !important; }
+  .st-key-gj_write_toggle label:has(input:checked) > span + div {
+    background: rgba(255, 255, 255, .45) !important; }
+  .st-key-gj_write_toggle [data-testid="stTooltipIcon"] { display: none; }
   /* Bandeau natif de Streamlit : invisible, seul le bouton de réouverture du menu reste cliquable */
   header[data-testid="stHeader"] {
     background: transparent; height: 0; min-height: 0; pointer-events: none;
@@ -267,9 +281,27 @@ def header(page_title: str, user: SessionUser | None) -> None:
             st.markdown(f'<p class="gj-title">{escape(page_title)}</p>', unsafe_allow_html=True)
 
         with st.container(key="gj_actions", horizontal=True, vertical_alignment="center", width="content"):
+            _write_mode_toggle(user)
             _theme_toggle()
             _user_menu(page_title, user)
     _apply_theme_switch()
+
+
+WRITE_TOGGLE_KEY = "gj_write_mode"
+
+
+def _write_mode_toggle(user: SessionUser | None) -> None:
+    """Consultation d'un compte par un administrateur : lecture seule ↔ mode édition."""
+    if user is None or impersonator() is None:
+        return
+    st.session_state[WRITE_TOGGLE_KEY] = is_write_mode()  # reflète l'état réel (droits relus en base)
+    editing = is_write_mode()
+    with st.container(key="gj_write_toggle", width="content"):
+        st.toggle(
+            ":material/edit: Mode édition" if editing else ":material/visibility: Lecture seule",
+            key=WRITE_TOGGLE_KEY,
+            on_change=lambda: set_write_mode(bool(st.session_state.get(WRITE_TOGGLE_KEY))),
+        )
 
 
 def _user_menu(page_title: str, user: SessionUser | None) -> None:
@@ -415,10 +447,20 @@ def impersonation_banner(user, admin) -> None:
 
     with st.container(border=True, key="gj_impersonation"):
         c1, c2 = st.columns([5, 1.6], vertical_alignment="center")
-        c1.markdown(
-            f":material/visibility: **Lecture seule** — tu consultes le compte de **{user.display_name}** "
-            f"({user.email}). Aucune modification n'est possible."
-        )
+        who = f"**{user.display_name}** ({user.email})"
+        if is_write_mode():
+            c1.markdown(
+                '<span class="gj-write-mode"></span>:material/edit: **Mode édition** — '
+                f"tu agis sur le compte de {who} comme si tu étais cet utilisateur : "
+                "tes modifications sont réelles. Repasse en lecture seule avec le bouton du header.",
+                unsafe_allow_html=True,
+            )
+        else:
+            c1.markdown(
+                f":material/visibility: **Lecture seule** — tu consultes le compte de {who}. "
+                "Aucune modification n'est possible ; active la bascule **Lecture seule** du header "
+                "pour agir à sa place."
+            )
         if c2.button(
             "Revenir à mon compte", icon=":material/logout:", type="primary", use_container_width=True
         ):

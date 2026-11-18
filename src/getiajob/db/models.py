@@ -109,6 +109,8 @@ class UserProfile(Base):
     exclude_keywords: Mapped[list] = mapped_column(JSONB, default=list)
     exclude_companies: Mapped[list] = mapped_column(JSONB, default=list)
     sources: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # None = toutes les sources
+    # Dernières valeurs du formulaire « Nouvelle recherche » (reprises à la recherche suivante)
+    search_options: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -233,6 +235,18 @@ class SearchSession(Base):
 # --------------------------------------------------------------------------- #
 # Avis de l'utilisateur sur les offres proposées
 # --------------------------------------------------------------------------- #
+
+
+class JobPin(Base):
+    """Offre épinglée par un utilisateur (liste à garder sous la main, envoyable par e-mail)."""
+
+    __tablename__ = "job_pins"
+    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_pin_user_job"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("job_offers.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class JobFeedback(Base):

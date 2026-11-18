@@ -153,6 +153,18 @@ class CVProfile(BaseModel):
     def is_outdated(self) -> bool:
         return self.schema_version < CV_SCHEMA_VERSION
 
+    def merged_skills(self) -> list[tuple[str, list[str]]]:
+        """Compétences par catégorie, les catégories en double (extraction par section) fusionnées."""
+        groups: dict[str, tuple[str, list[str]]] = {}
+        for g in self.skills:
+            _, items = groups.setdefault(g.category.strip().lower(), (g.category.strip(), []))
+            seen = {x.lower() for x in items}
+            for item in (i.strip() for i in g.items):
+                if item and item.lower() not in seen:
+                    items.append(item)
+                    seen.add(item.lower())
+        return [(name, items) for name, items in groups.values() if items]
+
     @property
     def hard_skills(self) -> list[str]:
         return [item for group in self.skills for item in group.items]
