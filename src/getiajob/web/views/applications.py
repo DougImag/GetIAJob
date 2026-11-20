@@ -7,7 +7,7 @@ from html import escape
 
 import streamlit as st
 
-from getiajob.scraping.base import SOURCE_LABELS
+from getiajob.scraping.base import OFFER_SOURCE_LABELS
 from getiajob.services.applications import (
     FOLLOW_UP_DAYS,
     NOTE_ICONS,
@@ -43,7 +43,13 @@ STATUS_HEX = {
     "withdrawn": "#6b7280",
 }
 SCORE_HEX = {"green": "#16a34a", "orange": "#ea580c", "red": "#dc2626"}
-SOURCE_HEX = {"linkedin": "#0a66c2", "francetravail": "#e2001a", "adzuna": "#16a34a", "apec": "#7c3aed"}
+SOURCE_HEX = {
+    "linkedin": "#0a66c2",
+    "francetravail": "#e2001a",
+    "adzuna": "#16a34a",
+    "apec": "#7c3aed",
+    "mail": "#db2777",
+}
 SORTS = {
     "recent": "Candidature la plus récente",
     "oldest": "Candidature la plus ancienne",
@@ -213,7 +219,7 @@ def _card_html(a: Application) -> str:
     if a.source:
         meta.append(
             f'<span class="gj-ap-src" style="--sc:{SOURCE_HEX.get(a.source, "#6b7280")}">'
-            f"{escape(SOURCE_LABELS.get(a.source, a.source))}</span>"
+            f"{escape(OFFER_SOURCE_LABELS.get(a.source, a.source))}</span>"
         )
     elif a.job_id is None:
         meta.append('<span class="gj-ap-src" style="--sc:#6b7280">Saisie manuelle</span>')

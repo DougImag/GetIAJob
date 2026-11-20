@@ -36,6 +36,7 @@ class SearchOptions:
 
     max_age_days: int = 7  # fraîcheur des annonces
     top_n: int = 20
+    min_score: int = 60  # seuil du score de matching CV ↔ offre
     keywords: list[str] = field(default_factory=list)
     locations: list[str] = field(default_factory=list)
     remote: list[str] = field(default_factory=list)
@@ -119,6 +120,7 @@ def build_preferences(
     ranking = RankingPreferences(
         prefilter_top_k=max(opts.prefilter_top_k, opts.top_n),
         top_n=opts.top_n,
+        min_score=opts.min_score,
         llm_weight=opts.llm_weight,
         hidden_job_ids=feedback.hidden_job_ids,
         liked_job_ids=feedback.liked_job_ids,

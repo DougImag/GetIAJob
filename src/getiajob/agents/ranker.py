@@ -159,6 +159,7 @@ def top_matches(
     job_ids: list[int] | None = None,
     exclude_ids: list[int] | None = None,
     adjustments: dict[int, float] | None = None,
+    min_score: float = 0,
 ) -> list[dict]:
     adjustments = adjustments or {}
     query = (
@@ -168,6 +169,8 @@ def top_matches(
         .order_by(JobMatch.final_score.desc())
         .limit(limit)
     )
+    if min_score:
+        query = query.where(JobMatch.final_score >= min_score)
     if since is not None:
         query = query.where(JobOffer.last_seen_at >= since)
     if job_ids is not None:
@@ -315,7 +318,14 @@ def rank_jobs(
         # Seules les offres notées ici : une offre sortie de la pré-sélection garderait sinon une
         # ancienne note, calculée avec d'autres critères.
         scored_ids = [job.id for job, _ in candidates]
-        return top_matches(session, cv_id, ranking.top_n, job_ids=scored_ids, adjustments=adjustments)
+        return top_matches(
+            session,
+            cv_id,
+            ranking.top_n,
+            job_ids=scored_ids,
+            adjustments=adjustments,
+            min_score=ranking.min_score,
+        )
 
 
 def ranker_node(state: dict) -> dict:

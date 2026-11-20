@@ -221,12 +221,19 @@ def _last_sync_caption() -> None:
 
 
 MAIL_KEY = "admin_mail_report"
-STATUS_COLORS = {"imported": "green", "unknown_sender": "orange", "unverified": "red", "not_alert": "gray"}
+STATUS_COLORS = {
+    "imported": "green",
+    "unknown_sender": "orange",
+    "unverified": "red",
+    "not_alert": "gray",
+    "new_type": "violet",
+    "ignored_type": "gray",
+}
 
 
 def _mail_section(active: bool, actor_id: int) -> None:
     settings = get_settings()
-    st.markdown("### Alertes e-mail APEC")
+    st.markdown("### Alertes e-mail (APEC, Free-Work…)")
     if not active:
         st.info(
             "Boîte non configurée : renseigner IMAP_HOST, IMAP_USER et IMAP_PASSWORD dans .env.",
@@ -307,8 +314,11 @@ def _mail_row(r) -> None:
     color = STATUS_COLORS.get(r.status, "gray")
     when = f"{r.received_at:%d/%m/%Y %H:%M}" if r.received_at else "—"
     who = r.user_label or r.sender or "expéditeur inconnu"
+    kind = f" · type {r.type_label or r.mail_type}" if (r.type_label or r.mail_type) else ""
     with st.container(border=True):
-        st.markdown(f":{color}-badge[{label}] **{r.subject or '(sans objet)'}**  \n:gray[{who} · {when}]")
+        st.markdown(
+            f":{color}-badge[{label}] **{r.subject or '(sans objet)'}**  \n:gray[{who} · {when}{kind}]"
+        )
         if r.postings:
             st.markdown(
                 "\n".join(

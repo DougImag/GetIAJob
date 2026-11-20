@@ -40,7 +40,6 @@ def render() -> None:
     saved = load_search_form(user.id)
 
     st.markdown("## Nouvelle recherche")
-    st.caption("Les valeurs proposées viennent de ta fiche ; tu peux les ajuster pour cette recherche.")
 
     if not cvs:
         st.info("Importe d'abord ton CV pour lancer une recherche.")
@@ -85,25 +84,34 @@ def render() -> None:
         cv = c2.selectbox("CV utilisé", options=cvs, index=cv_index, format_func=lambda c: c.label)
 
         st.markdown("##### Fraîcheur et volume")
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
             max_age_days = freshness_input(
                 "Fraîcheur des annonces",
                 saved.get("max_age_days") or profile.max_offer_age_days or defaults.search.days,
                 help="Ancienneté maximale des offres (valeur par défaut : celle de ta fiche).",
             )
-        top_n = c2.slider(
+        min_score = c2.slider(
+            "Score de matching minimum",
+            0,
+            100,
+            _clamp(saved.get("min_score"), 0, 100, int(defaults.ranking.min_score)),
+            step=5,
+            help="Score final CV ↔ offre (sur 100) en dessous duquel une offre n'est pas retenue.",
+        )
+        top_n = c3.slider(
             "Nombre de résultats souhaités", 3, 50, _clamp(saved.get("top_n"), 3, 50, defaults.ranking.top_n)
         )
 
         st.markdown("##### Ciblage")
-        keywords = st.text_input(
+        c1, c2 = st.columns(2)
+        keywords = c1.text_input(
             "Requêtes de recherche (optionnel)",
             value=text("keywords", []),
             placeholder="Vide = générées par l'IA à partir de ton CV et de ta fiche",
             help="Séparées par des virgules. Si renseigné, remplace les requêtes générées.",
         )
-        locations = st.text_input(
+        locations = c2.text_input(
             "Lieu(x)", value=text("locations", profile.locations or defaults.search.locations)
         )
         sources = sources_input(
@@ -201,6 +209,7 @@ def render() -> None:
         opts = SearchOptions(
             max_age_days=max_age_days,
             top_n=top_n,
+            min_score=min_score,
             keywords=parse_list(keywords),
             locations=parse_list(locations),
             remote=remote,

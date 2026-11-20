@@ -5,6 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from getiajob.db import ReadOnlyError
+from getiajob.services.mail_alerts import mailbox_configured, pending_mail_types
 from getiajob.web import layout, state
 from getiajob.web.views import (
     account,
@@ -16,6 +17,7 @@ from getiajob.web.views import (
     dashboard,
     home,
     login,
+    mail_types,
     profile,
     results,
     search,
@@ -58,6 +60,12 @@ PAGE_SPECS = {
         ":material/assignment_turned_in:",
         "candidatures",
     ),
+    "mail_alerts": (
+        mail_types.render,
+        "Mes alertes e-mail",
+        ":material/forward_to_inbox:",
+        "alertes-email",
+    ),
     "account": (account.render, "Mon compte", ":material/manage_accounts:", "compte"),
     "admin_users": (admin_users.render, "Utilisateurs", ":material/group:", "admin-utilisateurs"),
     "admin_sources": (
@@ -74,6 +82,10 @@ PAGE_SPECS = {
     ),
     "admin_quality": (admin_quality.render, "Qualité & IA", ":material/insights:", "admin-qualite"),
 }
+if user and mailbox_configured() and (n_pending := pending_mail_types(user.id)):
+    # Nouveaux types de mail à valider : signalés dans le menu
+    view, title, icon, url = PAGE_SPECS["mail_alerts"]
+    PAGE_SPECS["mail_alerts"] = (view, f"{title} ({n_pending})", icon, url)
 default_page = "dashboard" if user else "home"
 pages = {
     key: st.Page(view, title=title, icon=icon, url_path=url, default=key == default_page)
@@ -88,6 +100,8 @@ if user:
         "Mes ressources": [pages["dashboard"], pages["profile"]],
         "Recherche": [pages["search"], pages["results"], pages["applications"]],
     }
+    if mailbox_configured():
+        navigation["Recherche"].append(pages["mail_alerts"])
     if user.is_admin:
         navigation["Admin"] = [
             pages["admin_monitoring"],

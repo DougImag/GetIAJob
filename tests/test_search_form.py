@@ -47,3 +47,12 @@ def test_clamp():
     assert _clamp(80, 3, 50, 20) == 50
     assert _clamp(None, 3, 50, 20) == 20
     assert _clamp(0.4, 0.0, 1.0, 0.7) == 0.4
+
+
+def test_min_score_passed_to_ranking():
+    from getiajob.services.searches import SearchOptions, build_preferences
+    from getiajob.services.users import ProfileData
+
+    prefs = build_preferences(ProfileData(), SearchOptions(min_score=75))
+    assert prefs.ranking.min_score == 75
+    assert SearchOptions().min_score == 60

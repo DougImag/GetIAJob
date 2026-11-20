@@ -9,7 +9,7 @@ import streamlit as st
 
 from getiajob.db import SearchSession
 from getiajob.report import render_markdown
-from getiajob.scraping.base import SOURCE_LABELS
+from getiajob.scraping.base import OFFER_SOURCE_LABELS
 from getiajob.services.applications import (
     STATUS_COLORS,
     STATUSES,
@@ -265,6 +265,8 @@ def _criteria_chips(s: SearchSession) -> str:
         ("map-pin", ", ".join(search.get("locations", [])) or "Toutes localisations"),
         ("list", f"Top {ranking.get('top_n', '?')}"),
     ]
+    if min_score := ranking.get("min_score"):
+        chips.append(("check", f"Score ≥ {min_score:.0f}"))
     if remote := search.get("remote"):
         chips.append(("house", " / ".join(REMOTE_LABELS.get(r, r) for r in remote)))
     if levels := search.get("experience_levels"):
@@ -360,7 +362,13 @@ def _kpis(s: SearchSession, results: list[dict]) -> None:
 # Carte d'une offre
 # --------------------------------------------------------------------------- #
 
-SOURCE_COLORS = {"linkedin": "#0a66c2", "francetravail": "#e2001a", "adzuna": "#16a34a", "apec": "#7c3aed"}
+SOURCE_COLORS = {
+    "linkedin": "#0a66c2",
+    "francetravail": "#e2001a",
+    "adzuna": "#16a34a",
+    "apec": "#7c3aed",
+    "mail": "#db2777",
+}
 
 
 def _card_header(rank: int, r: dict) -> str:
@@ -369,7 +377,7 @@ def _card_header(rank: int, r: dict) -> str:
     source = r.get("source") or "linkedin"
     meta.append(
         f'<span class="gj-src" style="--sc:{SOURCE_COLORS.get(source, "#6b7280")}">'
-        f"{escape(SOURCE_LABELS.get(source, source))}</span>"
+        f"{escape(OFFER_SOURCE_LABELS.get(source, source))}</span>"
     )
     if r.get("company"):
         meta.append(f"<span>{icon('building')} {escape(r['company'])}</span>")

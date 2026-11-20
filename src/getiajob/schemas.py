@@ -260,6 +260,21 @@ class SearchPlan(BaseModel):
     )
 
 
+class MailOffer(BaseModel):
+    title: str = Field(description="Intitulé exact du poste ou de la mission")
+    company: str | None = Field(default=None, description="Entreprise ou client, si indiqué")
+    location: str | None = Field(default=None, description="Lieu, si indiqué")
+    contract: str | None = Field(default=None, description="CDI, CDD, Freelance, Stage… si indiqué")
+    salary: str | None = Field(default=None, description="Salaire ou TJM tel qu'écrit, si indiqué")
+    link: int | None = Field(default=None, description="Numéro N du lien [LN] qui ouvre cette offre")
+
+
+class MailOffers(BaseModel):
+    """Offres extraites d'un e-mail d'alerte d'un site d'emploi quelconque."""
+
+    offers: list[MailOffer] = Field(default_factory=list)
+
+
 class JobAssessment(BaseModel):
     """Évaluation d'une offre par l'agent 3."""
 

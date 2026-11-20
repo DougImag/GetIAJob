@@ -9,7 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from getiajob.config import get_settings
-from getiajob.scraping.base import ALL_SOURCES, SOURCE_LABELS, configured_sources
+from getiajob.scraping.base import ALL_SOURCES, SOURCE_CHOICE_LABELS, configured_sources
 from getiajob.services.users import SessionUser
 from getiajob.web.state import go, impersonator, is_write_mode, set_write_mode, sign_out
 
@@ -402,7 +402,7 @@ def sources_input(label: str, value: list[str] | None, key: str | None = None) -
     """Pastilles « Sources d'annonces » (seules les sources configurées sont proposées)."""
     available = configured_sources()
     default = [s for s in (value if value is not None else available) if s in available]
-    missing = [SOURCE_LABELS[s] for s in ALL_SOURCES if s not in available]
+    missing = [SOURCE_CHOICE_LABELS[s] for s in ALL_SOURCES if s not in available]
     help_text = (
         "Sites interrogés à chaque recherche ; une même offre vue sur plusieurs sites n'apparaît qu'une fois."
     )
@@ -415,7 +415,7 @@ def sources_input(label: str, value: list[str] | None, key: str | None = None) -
         options=available,
         default=default,
         selection_mode="multi",
-        format_func=SOURCE_LABELS.get,
+        format_func=SOURCE_CHOICE_LABELS.get,
         key=key,
         help=help_text,
     )

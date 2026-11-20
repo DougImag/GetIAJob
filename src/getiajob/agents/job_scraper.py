@@ -181,16 +181,16 @@ def store_posting(
 
 
 def _alert_offers(user_id: int | None, days: int) -> set[int]:
-    """Relève la boîte des alertes e-mail puis renvoie les offres APEC de l'utilisateur."""
+    """Relève la boîte des alertes e-mail puis renvoie les offres reçues par l'utilisateur."""
     from getiajob.services.mail_alerts import sync_mailbox, user_alert_job_ids
 
     if user_id is None:
         return set()
     report = sync_mailbox()
     if report.error:
-        log.warning("APEC : %s", report.error)
+        log.warning("Alertes e-mail : %s", report.error)
     ids = set(user_alert_job_ids(user_id, days))
-    log.info("APEC (alertes e-mail) : %d offre(s) sur la période.", len(ids))
+    log.info("Alertes e-mail : %d offre(s) sur la période.", len(ids))
     return ids
 
 
