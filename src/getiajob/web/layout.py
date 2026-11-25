@@ -384,8 +384,9 @@ def sidebar_footer() -> None:
     with st.sidebar:
         # Modèles configurés (LLM_MODEL / EMBEDDING_MODEL), pas d'appel à Ollama à chaque affichage
         st.caption(  # « deux espaces + \n » = retour à la ligne en Markdown
-            "Modèles open source via Ollama :  \n"
-            f"`{s.llm_model}` (analyse et notes)  \n"
+            "Modèles open source"
+            + (" via Ollama :  \n" if s.llm_provider == "ollama" else " :  \n")
+            + f"`{s.llm_model}` (analyse et notes)  \n"
             f"`{s.embedding_model}` (similarité)"
         )
 

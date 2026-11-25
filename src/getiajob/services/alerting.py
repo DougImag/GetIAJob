@@ -172,6 +172,9 @@ def detect(now: datetime | None = None) -> list[Finding]:
     ollama = supervision.check_ollama()
     if not ollama.ok:
         found.append(Finding("ollama.down", "critical", f"Ollama : {ollama.detail}"))
+    remote = supervision.check_remote_llm()
+    if remote is not None and not remote.ok:
+        found.append(Finding("llm.down", "critical", f"LLM distant : {remote.detail}"))
     return found
 
 

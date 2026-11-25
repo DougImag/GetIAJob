@@ -552,11 +552,32 @@ def check_ollama() -> Check:
             loaded = [m["name"] for m in client.get("/api/ps").raise_for_status().json().get("models", [])]
     except Exception as exc:
         return Check("Ollama", False, f"Injoignable ({type(exc).__name__})")
-    missing = [m for m in (s.llm_model, s.embedding_model) if m not in tags and f"{m}:latest" not in tags]
+    # Avec un LLM distant (LLM_PROVIDER=openai), Ollama ne sert plus qu'aux embeddings
+    needed = (s.llm_model, s.embedding_model) if s.llm_provider == "ollama" else (s.embedding_model,)
+    missing = [m for m in needed if m not in tags and f"{m}:latest" not in tags]
     detail = f"{len(tags)} modèle(s) installé(s) · en mémoire : {', '.join(loaded) or 'aucun'}"
     if missing:
         return Check("Ollama", False, f"Modèle(s) manquant(s) : {', '.join(missing)} · {detail}")
     return Check("Ollama", True, detail, time.monotonic() - start)
+
+
+def check_remote_llm() -> Check | None:
+    """API compatible OpenAI (LLM_PROVIDER=openai) : joignable et modèle proposé. None si LLM sur Ollama."""
+    s = get_settings()
+    if s.llm_provider != "openai":
+        return None
+    start = time.monotonic()
+    headers = {"Authorization": f"Bearer {s.llm_api_key}"} if s.llm_api_key else {}
+    try:
+        with httpx.Client(timeout=10, headers=headers) as client:
+            data = client.get(f"{s.llm_base_url.rstrip('/')}/models").raise_for_status().json()
+    except Exception as exc:
+        return Check("LLM distant", False, f"Injoignable ({type(exc).__name__}) · {s.llm_base_url}")
+    ids = {m.get("id") for m in data.get("data", [])}
+    access = "clé API" if s.llm_api_key else "sans clé API (accès anonyme très limité)"
+    if ids and s.llm_model not in ids:
+        return Check("LLM distant", False, f"Modèle {s.llm_model} non proposé par {s.llm_base_url}")
+    return Check("LLM distant", True, f"{s.llm_model} · {access}", time.monotonic() - start)
 
 
 def check_mailbox() -> Check:

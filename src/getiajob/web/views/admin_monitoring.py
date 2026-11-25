@@ -178,6 +178,8 @@ def _health() -> None:
     with st.container(border=True):
         _check_line(db)
         _check_line(sv.check_ollama())
+        if (remote := sv.check_remote_llm()) is not None:
+            _check_line(remote)
         _check_line(_event_check("Relève des alertes e-mail", "mail_sync", "jamais lancée"))
         _check_line(
             _event_check(

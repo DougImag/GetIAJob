@@ -56,7 +56,7 @@ def doctor() -> None:
         tags = httpx.get(f"{s.ollama_base_url}/api/tags", timeout=10).json()
         names = {m["name"] for m in tags.get("models", [])}
         console.print(f"[green]✔ Ollama joignable ({s.ollama_base_url})[/green]")
-        for model in (s.llm_model, s.embedding_model):
+        for model in _ollama_models():
             if model in names or f"{model}:latest" in names:
                 console.print(f"[green]  ✔ modèle {model}[/green]")
             else:
@@ -65,14 +65,26 @@ def doctor() -> None:
     except Exception as exc:
         ok = False
         console.print(f"[red]✘ Ollama ({s.ollama_base_url}) : {exc}[/red]")
+    from getiajob.services.supervision import check_remote_llm
+
+    if (remote := check_remote_llm()) is not None:
+        ok = ok and bool(remote.ok)
+        color, mark = ("green", "✔") if remote.ok else ("red", "✘")
+        console.print(f"[{color}]{mark} LLM distant ({s.llm_base_url}) : {remote.detail}[/{color}]")
     raise typer.Exit(0 if ok else 1)
+
+
+def _ollama_models() -> tuple[str, ...]:
+    """Modèles servis par Ollama : le LLM seulement si LLM_PROVIDER=ollama, toujours les embeddings."""
+    s = get_settings()
+    return (s.llm_model, s.embedding_model) if s.llm_provider == "ollama" else (s.embedding_model,)
 
 
 @app.command("pull-models")
 def pull_models() -> None:
-    """Télécharge dans Ollama le LLM et le modèle d'embedding configurés."""
+    """Télécharge dans Ollama le LLM (s'il y est servi) et le modèle d'embedding configurés."""
     s = get_settings()
-    for model in (s.llm_model, s.embedding_model):
+    for model in _ollama_models():
         console.print(f"Téléchargement de {model}… (peut prendre plusieurs minutes)")
         r = httpx.post(f"{s.ollama_base_url}/api/pull", json={"model": model, "stream": False}, timeout=None)
         r.raise_for_status()

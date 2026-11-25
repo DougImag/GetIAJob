@@ -115,10 +115,11 @@ Deux offres sont considérées « du même genre » au-delà d'une similarité c
 ## Stack technique
 
 - **Python 3.12** ; CLI avec Typer + Rich ; **interface web Streamlit**
-- **LangChain** (`langchain-ollama`) pour les modèles, **LangGraph** pour l'orchestration
+- **LangChain** (`langchain-ollama`, `langchain-openai`) pour les modèles, **LangGraph** pour l'orchestration
 - **Ollama** pour servir les modèles open source :
   - LLM par défaut : `qwen2.5:7b` (bon en français et en sortie JSON structurée)
   - Embeddings : `nomic-embed-text` (768 dimensions)
+- **LLM distant en option** : toute API compatible OpenAI (ex. **OVHcloud AI Endpoints**, modèle gratuit `Olala-v1.0-mini-7A1B`) — les embeddings restent sur Ollama
 - **PostgreSQL 16 + pgvector** (SQLAlchemy 2 / psycopg 3)
 - **PyMuPDF** (lecture des PDF avec positions, licence AGPL) et **python-docx** pour les CV
 - **httpx + BeautifulSoup** pour le scraping, **tenacity** pour les reprises sur erreur
@@ -282,6 +283,11 @@ Dans GitHub, **Settings › Environments › New environment** `production`, pui
 | `LLM_MODEL` | `qwen2.5:7b` | Modèle de chat (ex. `llama3.1:8b`, `mistral-nemo`, `qwen2.5:14b`) |
 | `LLM_NUM_CTX` | `8192` | Fenêtre de contexte envoyée à Ollama (le défaut d'Ollama tronque les CV/offres longs) |
 | `LLM_CONCURRENCY` | `2` | Appels LLM simultanés lors de l'analyse d'un CV (à aligner sur `OLLAMA_NUM_PARALLEL`) |
+| `LLM_PROVIDER` | `ollama` | `ollama` (LLM local) ou `openai` (API compatible OpenAI, cf. *LLM distant* ci-dessous). Les embeddings restent sur Ollama |
+| `LLM_BASE_URL` | `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1` | URL de l'API compatible OpenAI (si `LLM_PROVIDER=openai`) |
+| `LLM_API_KEY` | *(vide)* | Clé de l'API distante. Vide = accès anonyme (OVH : **1 requête par an, par modèle et par IP** — inutilisable en pratique, une clé est nécessaire) |
+| `LLM_JSON_MODE` | `json_schema` | Sortie structurée de l'API distante : `json_schema` (schéma imposé) ou `json_object` (schéma donné dans le prompt, si le modèle refuse `json_schema`) |
+| `LLM_MAX_RETRIES` | `3` | Nouvelles tentatives de l'API distante sur erreur réseau ou limite de débit (429) |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Modèle d'embedding |
 | `EMBEDDING_DIM` | `768` | Dimension des vecteurs, **doit correspondre au modèle d'embedding** |
 | `LINKEDIN_REQUEST_DELAY` | `2.5` | Délai moyen (s) entre deux requêtes LinkedIn |
@@ -316,6 +322,24 @@ Dans GitHub, **Settings › Environments › New environment** `production`, pui
 | `LOG_LEVEL` | `INFO` | Niveau de logs |
 
 > Changer de modèle d'embedding avec une autre dimension impose de recréer la base (`docker compose down -v`), les colonnes `vector` ayant une taille fixe.
+
+### LLM distant (OVHcloud AI Endpoints ou autre API compatible OpenAI)
+
+Sans GPU, un LLM local est lent (plusieurs minutes par étape de l'analyse d'un CV). Le LLM peut être servi par une API compatible OpenAI ; **les embeddings restent sur Ollama** (`nomic-embed-text` est rapide sur CPU, et changer de modèle d'embedding imposerait de recréer la base).
+
+```env
+LLM_PROVIDER=openai
+LLM_BASE_URL=https://oai.endpoints.kepler.ai.cloud.ovh.net/v1
+LLM_MODEL=Olala-v1.0-mini-7A1B
+LLM_API_KEY=<ta clé>    # indispensable en pratique (cf. ci-dessous)
+LLM_CONCURRENCY=2
+```
+
+- **Clé API indispensable** : l'accès anonyme (sans clé) n'autorise qu'**une requête par an, par modèle et par IP** (en-têtes `x-ratelimit-limit-year: 1`, constaté le 2026-11-25) ; ensuite erreur 429 « API rate limit exceeded ». Créer une clé dans l'espace client OVH (*Public Cloud → AI & Machine Learning → AI Endpoints*) ; les modèles gratuits (comme Olala) restent gratuits avec une clé.
+- **Modèles** : liste et tarifs sur le [catalogue AI Endpoints](https://www.ovhcloud.com/fr/public-cloud/ai-endpoints/catalog/) (ou `GET <LLM_BASE_URL>/models`). `Olala-v1.0-mini-7A1B` (gratuit, raisonnement, 32K de contexte) pour tester ; `Meta-Llama-3_3-70B-Instruct`, `Mistral-Small-3.2-24B-Instruct-2506` ou `gpt-oss-120b` pour une extraction plus fiable.
+- Le bloc de raisonnement éventuel (`<think>…</think>`) et les balises ```` ```json ```` sont retirés avant la lecture du JSON. Si le modèle refuse le schéma imposé, passer `LLM_JSON_MODE=json_object`.
+- `LLM_NUM_CTX` ne s'applique qu'à Ollama ; `LLM_MAX_TOKENS` borne aussi la réponse distante (raisonnement compris).
+- `getiajob doctor` et *Admin › Supervision* vérifient l'API distante (joignable, modèle proposé) ; Ollama n'y est plus contrôlé que pour le modèle d'embedding.
 
 ### Préférences
 
@@ -518,6 +542,10 @@ Tous les scripts passent par `scripts/cron-run.sh <journal> <commande>` (contene
 - [ ] Réinitialisation du mot de passe par email
 
 ## Journal des évolutions
+
+### 0.12.4 — 2026-11-25
+- **LLM distant configurable** : `LLM_PROVIDER=openai` sert le LLM par une API compatible OpenAI (par défaut **OVHcloud AI Endpoints**, ex. modèle gratuit `Olala-v1.0-mini-7A1B`), avec `LLM_BASE_URL`, `LLM_API_KEY` (indispensable chez OVH : l'accès anonyme est limité à 1 requête par an et par modèle), `LLM_JSON_MODE` et `LLM_MAX_RETRIES`. Les embeddings restent sur Ollama. Sortie structurée par `response_format` (`json_schema`, listes toujours bornées à 30 éléments) ; bloc de raisonnement et balises Markdown retirés avant la lecture du JSON. Nouvelle dépendance `langchain-openai`.
+- `getiajob doctor`, `getiajob pull-models`, *Admin › Supervision* et les alertes tiennent compte du fournisseur : contrôle de l'API distante (nouvelle alerte `llm.down`), Ollama vérifié pour le seul modèle d'embedding.
 
 ### 0.12.3 — 2026-11-18
 - **Arrêter une recherche** : bouton *Arrêter* dans l'en-tête d'une recherche en attente ou en cours (nouvel état « Arrêtée », non compté comme un échec dans la supervision). Le traitement vérifie entre chaque offre collectée et avant chaque évaluation par l'IA s'il doit continuer (`services/cancellation.py`), puis s'interrompt et libère la file ; une recherche arrêtée se **relance** en un clic. L'arrêt depuis *Admin › Supervision* interrompt lui aussi désormais réellement le traitement.

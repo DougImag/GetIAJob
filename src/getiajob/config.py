@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://getiajob:getiajob@db:5432/getiajob"
 
     ollama_base_url: str = "http://ollama:11434"
+    # Fournisseur du LLM : « ollama » (local) ou « openai » (toute API compatible OpenAI, ex. OVHcloud
+    # AI Endpoints). Les embeddings restent toujours sur Ollama (EMBEDDING_MODEL).
+    llm_provider: Literal["ollama", "openai"] = "ollama"
+    llm_base_url: str = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"  # si LLM_PROVIDER=openai
+    llm_api_key: str = ""  # vide = accès anonyme (OVH : 1 requête par an et par modèle → clé indispensable)
+    # Sortie structurée côté API OpenAI : « json_schema » (schéma imposé) ou « json_object » (JSON libre,
+    # schéma donné dans le prompt) si le fournisseur ou le modèle refuse json_schema.
+    llm_json_mode: Literal["json_schema", "json_object"] = "json_schema"
+    llm_max_retries: int = 3  # nouvelles tentatives sur erreur réseau / 429 (API distante seulement)
     llm_model: str = "qwen2.5:7b"
     llm_temperature: float = 0.0
     llm_num_ctx: int = 8192
