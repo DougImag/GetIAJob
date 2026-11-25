@@ -25,6 +25,7 @@ from getiajob.scraping.base import (
 from getiajob.scraping.francetravail import FranceTravailSource
 from getiajob.scraping.linkedin import LinkedInSource
 from getiajob.seniority import level_prompt, max_years
+from getiajob.services.cancellation import SearchCancelled, check_cancelled
 from getiajob.services.monitoring import record, timed
 
 log = logging.getLogger(__name__)
@@ -220,6 +221,7 @@ def scrape_jobs(profile: CVProfile, prefs: Preferences, user_id: int | None = No
                             remote=prefs.search.remote,
                             experience_levels=prefs.search.experience_levels,
                         ):
+                            check_cancelled()
                             job = store_posting(session, source, posting, query)
                             session.flush()
                             found.add(job.id)
@@ -232,6 +234,9 @@ def scrape_jobs(profile: CVProfile, prefs: Preferences, user_id: int | None = No
                             duration_ms=int((time.monotonic() - started) * 1000),
                         )
                         log.info("%s — « %s » @ %s : %d offres", label, query, location, len(found))
+            except SearchCancelled:
+                session.commit()  # les offres déjà collectées restent en base
+                raise
             except Exception as exc:  # une source en panne n'empêche pas les autres
                 session.rollback()
                 log.warning("%s indisponible, source ignorée : %s", label, exc)

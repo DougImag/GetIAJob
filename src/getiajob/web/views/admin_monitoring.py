@@ -128,8 +128,8 @@ def _searches(actor_id: int) -> None:
                 st.rerun()
     if running:
         st.caption(
-            "« Arrêter » marque la recherche en échec. Un traitement déjà en cours se termine en "
-            "arrière-plan sans modifier la recherche ; une recherche en attente ne sera pas lancée."
+            "« Arrêter » marque la recherche en échec. Un traitement en cours s'interrompt dès la fin "
+            "de l'appel en cours (IA ou site d'annonces) ; une recherche en attente ne sera pas lancée."
         )
 
     st.markdown("#### Derniers échecs")

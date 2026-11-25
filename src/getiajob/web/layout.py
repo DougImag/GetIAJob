@@ -242,6 +242,7 @@ DARK_CSS = """
   .gj-fr-chips span svg { color: #a5b4fc !important; }
 
   .gj-badge.done { color: #86efac !important; } .gj-badge.failed { color: #fca5a5 !important; }
+  .gj-badge.cancelled { color: #d1d5db !important; }
   .gj-badge.running, .gj-badge.pending, .gj-db-t svg, .gj-dk-ring { color: #a5b4fc !important; }
 
   /* Mes recherches */

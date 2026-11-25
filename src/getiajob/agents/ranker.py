@@ -22,6 +22,7 @@ from getiajob.db import CVRecord, JobMatch, JobOffer, session_scope
 from getiajob.llm import get_embeddings, structured
 from getiajob.schemas import CVProfile, JobAssessment
 from getiajob.seniority import level_check, level_prompt, max_years
+from getiajob.services.cancellation import check_cancelled
 from getiajob.services.feedback import feedback_adjustment
 from getiajob.services.monitoring import record, timed
 
@@ -251,18 +252,24 @@ def rank_jobs(
                 job.embedding = vector
             session.flush()
 
-        hidden = set(ranking.hidden_job_ids)
+        hidden, seen = set(ranking.hidden_job_ids), set(ranking.seen_job_ids)
         kept: list[JobOffer] = []
         reasons: list[str] = []
+        n_seen = 0
         for job in jobs:
             if job.id in hidden:
                 log.debug("Exclue « %s » : écartée par l'utilisateur", job.title)
+            elif job.id in seen:
+                log.debug("Exclue « %s » : déjà consultée", job.title)
+                n_seen += 1
             elif reason := hard_filter_reason(job, exp, levels):
                 log.debug("Exclue « %s » : %s", job.title, reason)
                 reasons.append(reason)
             else:
                 kept.append(job)
         log.info("%d/%d offres passent les filtres.", len(kept), len(jobs))
+        if n_seen:
+            log.info("%d offre(s) déjà consultée(s) écartée(s).", n_seen)
         if off_level := sum(1 for r in reasons if r.startswith(("niveau", "stage"))):
             log.info("Niveau visé (%s) : %d offre(s) écartée(s).", level_prompt(levels), off_level)
         if not kept:
@@ -290,6 +297,7 @@ def rank_jobs(
 
         cache_hits = 0
         for i, (job, sim) in enumerate(candidates, 1):
+            check_cancelled()
             match = session.scalar(select(JobMatch).where(JobMatch.cv_id == cv_id, JobMatch.job_id == job.id))
             if match is None:
                 match = JobMatch(cv_id=cv_id, job_id=job.id)

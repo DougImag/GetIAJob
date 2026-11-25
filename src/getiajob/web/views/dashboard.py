@@ -109,6 +109,7 @@ CSS = """
   .gj-badge.done { background: rgba(34, 197, 94, .14); color: #15803d; }
   .gj-badge.running, .gj-badge.pending { background: rgba(99, 102, 241, .14); color: var(--gj-primary); }
   .gj-badge.failed { background: rgba(239, 68, 68, .14); color: #b91c1c; }
+  .gj-badge.cancelled { background: rgba(107, 114, 128, .14); color: #4b5563; }
   .gj-empty { text-align: center; padding: 1.2rem .5rem; color: var(--gj-muted); font-size: .9rem; }
   .gj-empty svg { color: var(--gj-primary); opacity: .6; margin-bottom: .3rem; }
 </style>

@@ -17,6 +17,7 @@ from getiajob.services.searches import (
     reset_search_form,
     save_search_form,
 )
+from getiajob.services.seen import seen_ids
 from getiajob.services.users import get_profile
 from getiajob.web.layout import EXPERIENCE_LABELS, REMOTE_LABELS, freshness_input, parse_list, sources_input
 from getiajob.web.state import get_runner, go, go_profile, is_read_only, require_user
@@ -36,6 +37,7 @@ def render() -> None:
     cvs = list_cvs(user.id)
     defaults = load_preferences()
     n_feedback = len(list_feedback(user.id))
+    seen = seen_ids(user.id)
     today = date.today()
     saved = load_search_form(user.id)
 
@@ -146,8 +148,10 @@ def render() -> None:
         )
 
         use_feedback, feedback_llm = False, False
-        if n_feedback:
+        hide_seen = saved.get("hide_seen", True)
+        if n_feedback or seen:
             st.markdown("##### Mes avis")
+        if n_feedback:
             use_feedback = st.toggle(
                 f"Tenir compte de mes avis ({n_feedback} offre(s))",
                 value=saved.get("use_feedback", True),
@@ -160,6 +164,14 @@ def render() -> None:
                 value=saved.get("feedback_llm", True),
                 help="Un court résumé est ajouté aux attentes lues par l'IA (requêtes et notation). "
                 "Plus précis, mais les offres déjà notées sont ré-évaluées quand tes avis ont changé.",
+            )
+
+        if seen:
+            hide_seen = st.toggle(
+                f"Ne pas reproposer les offres déjà consultées ({len(seen)} offre(s))",
+                value=saved.get("hide_seen", True),
+                help="Les offres ouvertes avec « Voir l'offre » (ou leur titre) dans une recherche "
+                "précédente sont écartées : seules des offres que tu n'as pas encore vues sont classées.",
             )
 
         with st.expander("Options avancées"):
@@ -224,7 +236,9 @@ def render() -> None:
             sources=sources,
         )
         signals = feedback_signals(user.id, with_digest=feedback_llm) if use_feedback else FeedbackSignals()
-        prefs = build_preferences(profile, opts, base=defaults, feedback=signals)
+        prefs = build_preferences(
+            profile, opts, base=defaults, feedback=signals, seen_job_ids=seen if hide_seen else None
+        )
         search_id = create_search(
             user.id,
             cv.id,
@@ -233,6 +247,7 @@ def render() -> None:
             skip_scrape=skip_scrape,
             force_rank=force_rank,
             feedback_llm=use_feedback and feedback_llm,
+            hide_seen=bool(seen) and hide_seen,
         )
         save_search_form(
             user.id,
@@ -240,6 +255,7 @@ def render() -> None:
             cv_id=cv.id,
             use_feedback=use_feedback if n_feedback else saved.get("use_feedback", True),
             feedback_llm=feedback_llm if n_feedback else saved.get("feedback_llm", True),
+            hide_seen=hide_seen,
         )
         get_runner().submit_search(search_id)
         st.session_state["selected_search"] = search_id

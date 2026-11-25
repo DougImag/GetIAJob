@@ -149,6 +149,9 @@ class RankingPreferences(BaseModel):
     disliked_job_ids: list[int] = Field(
         default_factory=list, description="Offres écartées sur le fond : malus aux offres similaires"
     )
+    seen_job_ids: list[int] = Field(
+        default_factory=list, description="Offres déjà consultées (« Voir l'offre ») : exclues"
+    )
     feedback_points: float = Field(default=10, ge=0, le=30, description="Ajustement max du score (points)")
 
 

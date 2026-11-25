@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from html import escape
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from getiajob.db import SearchSession
 from getiajob.report import render_markdown
@@ -37,8 +38,11 @@ from getiajob.services.searches import (
     get_search,
     list_searches,
     queue_position,
+    relaunch_search,
     rerank_search,
+    stop_search,
 )
+from getiajob.services.seen import mark_seen, seen_map
 from getiajob.services.users import SessionUser
 from getiajob.web.layout import EXPERIENCE_LABELS, FRESHNESS_LABELS, REMOTE_LABELS, score_color
 from getiajob.web.layout import badges as layout_badges
@@ -47,7 +51,7 @@ from getiajob.web.state import APPLICATION_FOCUS_KEY, get_runner, go, is_read_on
 SHORT_SKILL = 32  # au-delà, une « compétence » est une phrase : pas affichée sur la carte
 VERDICTS = {"green": "Très pertinent", "orange": "Pertinent", "red": "Peu pertinent"}
 COLORS = {"green": "#16a34a", "orange": "#ea580c", "red": "#dc2626"}
-STATUS_STYLE = {"done": "ok", "failed": "ko", "running": "run", "pending": "run"}
+STATUS_STYLE = {"done": "ok", "failed": "ko", "running": "run", "pending": "run", "cancelled": "off"}
 
 # Icônes Lucide (https://lucide.dev, licence ISC)
 ICONS = {
@@ -71,6 +75,8 @@ ICONS = {
     '<path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
     "user": '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
     "check": '<path d="M20 6 9 17l-5-5"/>',
+    "eye": '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 '
+    '10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
     "alert": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>'
     '<path d="M12 9v4"/><path d="M12 17h.01"/>',
     "sliders": '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" '
@@ -97,6 +103,7 @@ CSS = """
   .gj-status.ok { background: #dcfce7; color: #166534; }
   .gj-status.ko { background: #fee2e2; color: #991b1b; }
   .gj-status.run { background: #e0e7ff; color: #3730a3; }
+  .gj-status.off { background: #f3f4f6; color: #4b5563; }
   .gj-sh-sub { color: #6b7280; font-size: .88rem; margin: .25rem 0 .8rem; display: flex; gap: 1rem;
     flex-wrap: wrap; }
   .gj-sh-sub span, .gj-chip, .gj-meta span { display: inline-flex; align-items: center; gap: .35rem; }
@@ -119,6 +126,14 @@ CSS = """
   [class*="st-key-gj_card_"]:has([class*="_pin_on_"]),
   [class*="st-key-gj_card_"]:has([class*="_pin_on_"]):hover {
     border-left: 4px solid #f59e0b !important; }
+  /* Offre déjà consultée : carte grisée, titre atténué, pastille « Consultée le … » */
+  [class*="st-key-gj_card_"]:has(.gj-seen) { background: color-mix(in srgb, #6b7280 7%, transparent); }
+  [class*="st-key-gj_card_"]:has(.gj-seen) .gj-card-title a { color: #6b7280; font-weight: 600; }
+  .gj-seen { display: inline-flex; align-items: center; gap: .3rem; font-size: .72rem; font-weight: 600;
+    padding: .1rem .5rem; border-radius: 999px; color: #4b5563;
+    background: color-mix(in srgb, #6b7280 15%, transparent); }
+  /* Bouton technique « consultée », cliqué par le script SEEN_JS : jamais affiché */
+  [class*="st-key-gj_seen_"] { display: none !important; }
   [class*="st-key-gj_card_"]:hover { border-color: rgba(79, 70, 229, .35) !important;
     box-shadow: 0 14px 34px -20px rgba(49, 46, 129, .45); }
   .gj-card { display: flex; gap: 1.1rem; align-items: flex-start; }
@@ -278,6 +293,8 @@ def _criteria_chips(s: SearchSession) -> str:
     if ranking.get("hidden_job_ids") or ranking.get("liked_job_ids"):
         n = len(ranking.get("hidden_job_ids", [])) + len(ranking.get("liked_job_ids", []))
         chips.append(("sliders", f"{n} avis pris en compte"))
+    if n_seen := len(ranking.get("seen_job_ids", [])):
+        chips.append(("eye", f"{n_seen} offre(s) déjà consultée(s) écartée(s)"))
     return "".join(f'<span class="gj-chip">{icon(i, 13)}{escape(t)}</span>' for i, t in chips)
 
 
@@ -330,7 +347,18 @@ def _search_header(user: SessionUser, s: SearchSession, n_pins: int = 0) -> None
                     help="Télécharger le rapport Markdown",
                 )
                 _send_pins_button(user, s, n_pins)
-            if s.status in ("done", "failed"):
+            if s.status in ("pending", "running"):
+                if st.button(
+                    "Arrêter",
+                    icon=":material/stop_circle:",
+                    disabled=is_read_only(),
+                    help="Interrompre cette recherche (l'appel en cours à l'IA ou au site finit d'abord)",
+                    key=f"stop-search-{s.id}",
+                ):
+                    if stop_search(user_id, s.id):
+                        st.toast("Recherche arrêtée.", icon=":material/stop_circle:")
+                    st.rerun()
+            if s.status in ("done", "failed", "cancelled"):
                 with st.popover("", icon=":material/delete:", help="Supprimer cette recherche"):
                     st.write("Supprimer cette recherche de l'historique ?")
                     if st.button("Confirmer", type="primary", key=f"del-search-{s.id}"):
@@ -371,7 +399,7 @@ SOURCE_COLORS = {
 }
 
 
-def _card_header(rank: int, r: dict) -> str:
+def _card_header(rank: int, r: dict, seen_at: datetime | None = None) -> str:
     color = score_color(r["final_score"])
     meta = []
     source = r.get("source") or "linkedin"
@@ -411,7 +439,14 @@ def _card_header(rank: int, r: dict) -> str:
         f"<div><b>{r['final_score']:.0f}</b><small>/ 100</small></div></div>"
         f'<div class="gj-card-body"><div class="gj-card-title"><span class="gj-rank">#{rank}</span>'
         f'<a href="{escape(r["url"], quote=True)}" target="_blank" rel="noopener">'
-        f"{escape(r['title'])}</a></div>"
+        f"{escape(r['title'])}</a>"
+        + (
+            f'<span class="gj-seen" title="Annonce ouverte le {seen_at.astimezone():%d/%m/%Y à %H:%M}">'
+            f"{icon('eye', 12)} Consultée le {seen_at.astimezone():%d/%m}</span>"
+            if seen_at
+            else ""
+        )
+        + "</div>"
         f'<div class="gj-meta">{"".join(meta)}</div>{summary}'
         f"{f'<div class=gj-skills>{skills}</div>' if skills else ''}{adj_html}</div></div>"
     )
@@ -606,9 +641,10 @@ def _result_card(
     fb: Feedback | None,
     mark: AppliedMark | None = None,
     pinned: bool = False,
+    seen_at: datetime | None = None,
 ) -> None:
     with st.container(border=True, key=f"gj_card_{search_id}_{rank}"):
-        st.markdown(_card_header(rank, r), unsafe_allow_html=True)
+        st.markdown(_card_header(rank, r, seen_at), unsafe_allow_html=True)
         with st.expander("Analyse détaillée", icon=":material/insights:"):
             _analysis(r)
         with st.container(horizontal=True, vertical_alignment="center", gap="small"):
@@ -616,6 +652,30 @@ def _result_card(
             _applied_controls(user_id, search_id, r, mark)
             _feedback_controls(user_id, search_id, r, fb)
             _pin_button(user_id, search_id, r, pinned)
+        # Invisible : cliqué par SEEN_JS quand l'annonce est ouverte (« Voir l'offre » ou titre)
+        if seen_at is None and r.get("job_id") and not is_read_only():
+            if st.button("Consultée", key=f"gj_seen_{search_id}_{r['job_id']}"):
+                mark_seen(user_id, r["job_id"])
+                st.rerun()
+
+
+# Un clic (ou clic molette) sur un lien d'une carte ouvre l'annonce normalement, puis clique le bouton
+# invisible « consultée » de la carte pour l'enregistrer. Écouteur posé une seule fois sur la page.
+SEEN_JS = """<script>
+const d = window.parent.document;
+if (!d.gjSeenHook) {
+  d.gjSeenHook = true;
+  const onOpen = (e) => {
+    if (e.type === "auxclick" && e.button !== 1) return;
+    const card = e.target.closest && e.target.closest('[class*="st-key-gj_card_"]');
+    if (!card || !e.target.closest("a[href]")) return;
+    const btn = card.querySelector('[class*="st-key-gj_seen_"] button');
+    if (btn) setTimeout(() => btn.click(), 0);
+  };
+  d.addEventListener("click", onOpen, true);
+  d.addEventListener("auxclick", onOpen, true);
+}
+</script>"""
 
 
 # --------------------------------------------------------------------------- #
@@ -653,6 +713,25 @@ def render() -> None:
         st.error(f"La recherche a échoué : {s.error}", icon=":material/error:")
         st.caption("Vérifie qu'Ollama est démarré et que les modèles sont téléchargés, puis relance.")
         return
+    if s.status == "cancelled":
+        when = f" le {s.finished_at.astimezone():%d/%m/%Y à %H:%M}" if s.finished_at else ""
+        st.info(
+            f"Recherche arrêtée{when}. Les offres déjà collectées restent en base pour tes prochaines "
+            "recherches.",
+            icon=":material/stop_circle:",
+        )
+        if st.button(
+            "Relancer",
+            icon=":material/replay:",
+            type="primary",
+            disabled=is_read_only(),
+            help="Relancer cette recherche avec les mêmes critères",
+            key=f"relaunch-search-{s.id}",
+        ):
+            if relaunch_search(user.id, s.id):
+                get_runner().submit_search(s.id)
+            st.rerun()
+        return
 
     results = s.results or []
     _kpis(s, results)
@@ -665,6 +744,7 @@ def render() -> None:
 
     feedback = feedback_map(user.id)
     applied = applied_map(user.id)
+    seen = seen_map(user.id)
     rated = [r for r in results if r.get("job_id") in feedback]
     with st.container(border=True):
         c1, c2 = st.columns([3, 1], vertical_alignment="center")
@@ -691,7 +771,7 @@ def render() -> None:
 
     # Filtres
     counts = {k: sum(1 for r in results if score_color(r["final_score"]) == k) for k in VERDICTS}
-    f1, f2, f3 = st.columns([3, 2, 1.4], vertical_alignment="bottom")
+    f1, f2, f3, f4 = st.columns([1.8, 1.5, 1.6, 1.9], vertical_alignment="bottom")
     present = [k for k in VERDICTS if counts[k]]
     verdicts = f1.pills(
         "Pertinence",
@@ -703,6 +783,12 @@ def render() -> None:
     )
     min_score = f2.slider("Score minimum", 0, 100, 0, step=5, key=f"min-score-{s.id}")
     hide_rejected = f3.toggle("Masquer les offres écartées", value=True)
+    hide_seen = f4.toggle(
+        "Masquer les offres déjà consultées",
+        value=False,
+        key="hide-seen-results",
+        help="Offres déjà ouvertes avec « Voir l'offre » ou leur titre",
+    )
 
     shown = [
         (rank, r)
@@ -711,7 +797,23 @@ def render() -> None:
         and score_color(r["final_score"]) in (verdicts or [])
         and not (hide_rejected and (fb := feedback.get(r.get("job_id"))) and not fb.liked)
     ]
-    st.caption(f"{len(shown)} offre(s) affichée(s) sur {len(results)}")
+    n_seen = sum(1 for _, r in shown if r.get("job_id") in seen)
+    if hide_seen:
+        shown = [(rank, r) for rank, r in shown if r.get("job_id") not in seen]
+    st.caption(
+        f"{len(shown)} offre(s) affichée(s) sur {len(results)}"
+        + (f" · {n_seen} déjà consultée(s)" + (" masquée(s)" if hide_seen else "") if n_seen else "")
+    )
+    components.html(SEEN_JS, height=0)
     for rank, r in shown:
         job_id = r.get("job_id")
-        _result_card(rank, r, user.id, s.id, feedback.get(job_id), applied.get(job_id), pinned=job_id in pins)
+        _result_card(
+            rank,
+            r,
+            user.id,
+            s.id,
+            feedback.get(job_id),
+            applied.get(job_id),
+            pinned=job_id in pins,
+            seen_at=seen.get(job_id),
+        )

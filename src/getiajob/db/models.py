@@ -251,6 +251,18 @@ class JobPin(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class JobView(Base):
+    """Offre consultée par un utilisateur (clic sur « Voir l'offre » ou sur son titre)."""
+
+    __tablename__ = "job_views"
+    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_view_user_job"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("job_offers.id", ondelete="CASCADE"))
+    viewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class JobFeedback(Base):
     """Avis d'un utilisateur sur une offre : « j'aime » (+1) ou « pas pour moi » (-1),
     motifs et commentaire libre.

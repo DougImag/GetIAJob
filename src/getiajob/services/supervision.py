@@ -105,7 +105,7 @@ def activity(days: int = 30) -> Activity:
         """
         SELECT date_trunc('day', created_at)::date AS jour,
                CASE status WHEN 'failed' THEN 'Échec' WHEN 'done' THEN 'Terminée'
-                           ELSE 'En cours' END AS statut,
+                           WHEN 'cancelled' THEN 'Arrêtée' ELSE 'En cours' END AS statut,
                count(*) AS n
         FROM search_sessions WHERE created_at >= :since GROUP BY 1, 2 ORDER BY 1
         """,
@@ -191,8 +191,9 @@ def failed_searches(limit: int = 30, email: str | None = None) -> list[SearchRow
 def cancel_search(actor_id: int, search_id: int) -> bool:
     """Marque en échec une recherche en attente ou bloquée.
 
-    Une recherche en attente ne sera pas lancée. Pour une recherche en cours, le traitement ne peut
-    pas être interrompu : il se termine en arrière-plan mais ne modifie plus la recherche.
+    Une recherche en attente ne sera pas lancée. Une recherche en cours s'interrompt à la prochaine
+    vérification (offre collectée ou évaluée) ; un appel déjà engagé (LLM, site d'annonces) se termine
+    d'abord, sans modifier la recherche.
     """
     with session_scope() as session:
         result = session.execute(
