@@ -71,6 +71,16 @@ def doctor() -> None:
         ok = ok and bool(remote.ok)
         color, mark = ("green", "✔") if remote.ok else ("red", "✘")
         console.print(f"[{color}]{mark} LLM distant ({s.llm_base_url}) : {remote.detail}[/{color}]")
+        if remote.ok:
+            # La liste des modèles est publique : seul un vrai appel (1 token) vérifie la clé et le quota.
+            try:
+                from getiajob.llm import get_chat_model
+
+                get_chat_model().bind(max_tokens=1).invoke("ok")
+                console.print("[green]  ✔ appel de test accepté (clé et quota OK)[/green]")
+            except Exception as exc:
+                ok = False
+                console.print(f"[red]  ✘ appel de test refusé : {type(exc).__name__} : {exc}[/red]")
     raise typer.Exit(0 if ok else 1)
 
 

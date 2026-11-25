@@ -340,6 +340,7 @@ LLM_CONCURRENCY=2
 - Le bloc de raisonnement éventuel (`<think>…</think>`) et les balises ```` ```json ```` sont retirés avant la lecture du JSON. Si le modèle refuse le schéma imposé, passer `LLM_JSON_MODE=json_object`.
 - `LLM_NUM_CTX` ne s'applique qu'à Ollama ; `LLM_MAX_TOKENS` borne aussi la réponse distante (raisonnement compris).
 - `getiajob doctor` et *Admin › Supervision* vérifient l'API distante (joignable, modèle proposé) ; Ollama n'y est plus contrôlé que pour le modèle d'embedding.
+- Erreur **401 « Your token is not allowed to perform the required actions on any tenant »** : la clé est reconnue mais n'a pas les droits sur AI Endpoints (clé tout juste créée, projet Public Cloud sans moyen de paiement validé ou en mode découverte, clé créée hors de la section *AI Endpoints*). `getiajob doctor` le détecte.
 
 ### Préférences
 
@@ -546,6 +547,7 @@ Tous les scripts passent par `scripts/cron-run.sh <journal> <commande>` (contene
 ### 0.12.4 — 2026-11-25
 - **LLM distant configurable** : `LLM_PROVIDER=openai` sert le LLM par une API compatible OpenAI (par défaut **OVHcloud AI Endpoints**, ex. modèle gratuit `Olala-v1.0-mini-7A1B`), avec `LLM_BASE_URL`, `LLM_API_KEY` (indispensable chez OVH : l'accès anonyme est limité à 1 requête par an et par modèle), `LLM_JSON_MODE` et `LLM_MAX_RETRIES`. Les embeddings restent sur Ollama. Sortie structurée par `response_format` (`json_schema`, listes toujours bornées à 30 éléments) ; bloc de raisonnement et balises Markdown retirés avant la lecture du JSON. Nouvelle dépendance `langchain-openai`.
 - `getiajob doctor`, `getiajob pull-models`, *Admin › Supervision* et les alertes tiennent compte du fournisseur : contrôle de l'API distante (nouvelle alerte `llm.down`), Ollama vérifié pour le seul modèle d'embedding.
+- `getiajob doctor` fait un appel de test d'un token au LLM distant (la liste des modèles étant publique, seul un vrai appel vérifie la clé et le quota). Le message d'échec de l'analyse d'un CV ne renvoie plus vers Ollama quand le LLM est distant.
 
 ### 0.12.3 — 2026-11-18
 - **Arrêter une recherche** : bouton *Arrêter* dans l'en-tête d'une recherche en attente ou en cours (nouvel état « Arrêtée », non compté comme un échec dans la supervision). Le traitement vérifie entre chaque offre collectée et avant chaque évaluation par l'IA s'il doit continuer (`services/cancellation.py`), puis s'interrompt et libère la file ; une recherche arrêtée se **relance** en un clic. L'arrêt depuis *Admin › Supervision* interrompt lui aussi désormais réellement le traitement.

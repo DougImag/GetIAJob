@@ -14,6 +14,7 @@ from getiajob.agents.cv_analyzer import SUPPORTED_EXTENSIONS, save_cv
 from getiajob.cv_pdf import file_name as cv_pdf_name
 from getiajob.cv_pdf import render_cv_pdf
 from getiajob.cv_text import detected_sections
+from getiajob.llm import uses_ollama_llm
 from getiajob.schemas import CVProfile, Experience
 from getiajob.services.cvs import (
     CVSummary,
@@ -619,9 +620,13 @@ def _cv_card(user_id: int, cv: CVSummary, is_current: bool) -> None:
             if p is None:
                 return
         elif cv.analysis_status == "failed":
+            hint = (
+                "Ollama démarré ? modèle téléchargé ?"
+                if uses_ollama_llm()
+                else "API du LLM joignable ? clé LLM_API_KEY valide ?"
+            )
             st.error(
-                "L'IA n'a pas pu analyser ce CV (Ollama démarré ? modèle téléchargé ?).  \n"
-                f"`{(cv.analysis_error or '')[:300]}`",
+                f"L'IA n'a pas pu analyser ce CV ({hint}).  \n`{(cv.analysis_error or '')[:300]}`",
                 icon=":material/error:",
             )
             if st.button("Réessayer", key=f"retry-{cv.id}", icon=":material/refresh:"):

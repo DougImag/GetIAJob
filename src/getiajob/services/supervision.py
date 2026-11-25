@@ -571,6 +571,10 @@ def check_remote_llm() -> Check | None:
     try:
         with httpx.Client(timeout=10, headers=headers) as client:
             data = client.get(f"{s.llm_base_url.rstrip('/')}/models").raise_for_status().json()
+    except httpx.HTTPStatusError as exc:
+        hint = " (clé API refusée)" if exc.response.status_code in (401, 403) else ""
+        body = exc.response.text[:150]
+        return Check("LLM distant", False, f"HTTP {exc.response.status_code}{hint} : {body}")
     except Exception as exc:
         return Check("LLM distant", False, f"Injoignable ({type(exc).__name__}) · {s.llm_base_url}")
     ids = {m.get("id") for m in data.get("data", [])}
