@@ -37,6 +37,16 @@ ALERT_DATE_RE = re.compile(r"\bdu (\d{2})/(\d{2})/(\d{4})")
 SEARCH_RE = re.compile(r"correspondent? à votre recherche\s*:\s*([^\n|<]+)", re.I)
 PLAIN_LINK_RE = re.compile(r"([^\n<>\t]*?)\s*<(https?://[^>\s]+)>")
 MAX_MESSAGES = 300
+FORWARD_HEADERS = ("X-Forwarded-For", "Resent-From", "X-Original-Sender")
+# Bloc d'un transfert manuel (« Début du message réexpédié », « ---------- Forwarded message »…)
+FORWARD_MARKER_RE = re.compile(
+    r"(message (r[ée]exp[ée]di[ée]|transf[ée]r[ée]|d'origine)|forwarded message|original message"
+    r"|weitergeleitete nachricht)",
+    re.I,
+)
+FORWARDED_FROM_RE = re.compile(r"^[>\s*]*(?:De|From|Von|Exp[ée]diteur)\s*:\s*(.+?)\s*$", re.M | re.I)
+# Domaines « composés » : le nom de l'émetteur est le 3e niveau (ex. pole-emploi.gouv.fr)
+COMPOUND_TLDS = {"co", "com", "gouv", "org", "ac", "net"}
 
 
 @dataclass
@@ -48,10 +58,21 @@ class ParsedAlert:
     verified: bool  # l'expéditeur est authentifié (SPF / DKIM / DMARC) par le serveur de réception
     postings: list[JobPosting] = field(default_factory=list)
     alert_name: str | None = None
+    candidates: list[str] = field(default_factory=list)  # adresses pouvant être celle de l'utilisateur
+    origin: str | None = None  # adresse du site émetteur de l'alerte (contact@free-work.com…)
+    origin_name: str | None = None  # nom affiché de l'émetteur (« Free-Work »)
+    message: Message | None = field(default=None, repr=False)
 
     @property
     def is_alert(self) -> bool:
         return bool(self.postings)
+
+    @property
+    def mail_type(self) -> str | None:
+        """Type de mail : domaine du site émetteur (« apec.fr », « free-work.com »…)."""
+        if self.postings:  # alerte APEC reconnue par son contenu, même transférée sans en-tête d'origine
+            return "apec.fr"
+        return mail_domain(self.origin) if self.origin else None
 
 
 def message_key(msg: Message, raw: bytes) -> str:
@@ -90,6 +111,48 @@ def sender_address(msg: Message) -> str | None:
                 if "@" in address and not _is_apec(address):
                     return address
     return None
+
+
+def address_candidates(msg: Message) -> list[str]:
+    """Adresses pouvant être celle de l'utilisateur : expéditeur, puis adresses de transfert automatique."""
+    found: list[str] = []
+    for header in ("From", *FORWARD_HEADERS):
+        for value in msg.get_all(header) or []:
+            for candidate in re.split(r"[\s,]+", value) if header != "From" else [value]:
+                address = parseaddr(candidate)[1].lower()
+                if "@" in address and address not in found:
+                    found.append(address)
+    return found
+
+
+def mail_domain(address: str) -> str:
+    """Domaine « organisation » d'une adresse : news.free-work.com → free-work.com."""
+    host = address.rsplit("@", 1)[-1].lower().strip(".")
+    parts = host.split(".")
+    keep = 3 if len(parts) > 2 and parts[-2] in COMPOUND_TLDS else 2
+    return ".".join(parts[-keep:])
+
+
+def origin_sender(msg: Message, body: str, users: set[str] = frozenset()) -> tuple[str | None, str | None]:
+    """(adresse, nom) du site qui a émis l'alerte.
+
+    Transfert automatique : l'expéditeur (From) est le site lui-même. Transfert manuel : l'expéditeur est
+    l'utilisateur, le site est dans le bloc « De : … » du message transféré.
+    """
+    name, address = parseaddr(msg.get("From") or "")
+    address = address.lower()
+    if (
+        address
+        and address not in users
+        and not re.match(r"^(fwd?|tr|wg)\s*:", _decode(msg.get("Subject")), re.I)
+    ):
+        return address, _decode(name).strip(" \"'") or None
+    marker = FORWARD_MARKER_RE.search(body)
+    for m in FORWARDED_FROM_RE.finditer(body, marker.start() if marker else 0):
+        fname, faddr = parseaddr(m.group(1))
+        if "@" in faddr and faddr.lower() not in users:
+            return faddr.lower(), fname.strip(" \"'") or None
+    return None, None
 
 
 def is_verified(msg: Message) -> bool:
@@ -216,7 +279,7 @@ def parse_offers(msg: Message, alert_name: str | None, posted_at: datetime | Non
     return postings
 
 
-def parse_alert(raw: bytes) -> ParsedAlert:
+def parse_alert(raw: bytes, users: set[str] = frozenset()) -> ParsedAlert:
     msg = email.message_from_bytes(raw)
     subject = _decode(msg.get("Subject"))
     try:
@@ -225,6 +288,7 @@ def parse_alert(raw: bytes) -> ParsedAlert:
         received = None
     body = _body_text(msg)
     alert_name = (m.group(1).strip() if (m := SEARCH_RE.search(body)) else None) or None
+    origin, origin_name = origin_sender(msg, body, users)
     return ParsedAlert(
         message_key=message_key(msg, raw),
         subject=subject[:500],
@@ -233,6 +297,10 @@ def parse_alert(raw: bytes) -> ParsedAlert:
         verified=is_verified(msg),
         postings=parse_offers(msg, alert_name, _alert_date(subject, body, received)),
         alert_name=alert_name,
+        candidates=address_candidates(msg),
+        origin=origin,
+        origin_name=origin_name,
+        message=msg,
     )
 
 

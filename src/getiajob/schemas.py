@@ -153,6 +153,18 @@ class CVProfile(BaseModel):
     def is_outdated(self) -> bool:
         return self.schema_version < CV_SCHEMA_VERSION
 
+    def merged_skills(self) -> list[tuple[str, list[str]]]:
+        """Compétences par catégorie, les catégories en double (extraction par section) fusionnées."""
+        groups: dict[str, tuple[str, list[str]]] = {}
+        for g in self.skills:
+            _, items = groups.setdefault(g.category.strip().lower(), (g.category.strip(), []))
+            seen = {x.lower() for x in items}
+            for item in (i.strip() for i in g.items):
+                if item and item.lower() not in seen:
+                    items.append(item)
+                    seen.add(item.lower())
+        return [(name, items) for name, items in groups.values() if items]
+
     @property
     def hard_skills(self) -> list[str]:
         return [item for group in self.skills for item in group.items]
@@ -246,6 +258,21 @@ class SearchPlan(BaseModel):
     queries: list[str] = Field(
         description="Requêtes de recherche LinkedIn courtes (2 à 4 mots), de la plus à la moins pertinente"
     )
+
+
+class MailOffer(BaseModel):
+    title: str = Field(description="Intitulé exact du poste ou de la mission")
+    company: str | None = Field(default=None, description="Entreprise ou client, si indiqué")
+    location: str | None = Field(default=None, description="Lieu, si indiqué")
+    contract: str | None = Field(default=None, description="CDI, CDD, Freelance, Stage… si indiqué")
+    salary: str | None = Field(default=None, description="Salaire ou TJM tel qu'écrit, si indiqué")
+    link: int | None = Field(default=None, description="Numéro N du lien [LN] qui ouvre cette offre")
+
+
+class MailOffers(BaseModel):
+    """Offres extraites d'un e-mail d'alerte d'un site d'emploi quelconque."""
+
+    offers: list[MailOffer] = Field(default_factory=list)
 
 
 class JobAssessment(BaseModel):

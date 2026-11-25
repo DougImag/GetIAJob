@@ -229,9 +229,28 @@ def get_profile(user_id: int) -> ProfileData:
         return ProfileData(**{k: getattr(row, k) for k in ProfileData.__dataclass_fields__})
 
 
+# Options du formulaire de recherche qui reprennent une valeur de la fiche : oubliées quand la fiche
+# est enregistrée, pour que ses nouvelles valeurs s'appliquent à la recherche suivante.
+PROFILE_SEARCH_OPTIONS = frozenset(
+    {
+        "max_age_days",
+        "locations",
+        "sources",
+        "remote",
+        "experience_levels",
+        "exclude_keywords",
+        "exclude_companies",
+    }
+)
+
+
 def save_profile(user_id: int, data: ProfileData) -> None:
     with session_scope() as session:
         row = session.get(UserProfile, user_id) or UserProfile(user_id=user_id)
         for key, value in asdict(data).items():
             setattr(row, key, value)
+        if row.search_options:
+            row.search_options = {
+                k: v for k, v in row.search_options.items() if k not in PROFILE_SEARCH_OPTIONS
+            } or None
         session.add(row)

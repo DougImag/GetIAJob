@@ -128,8 +128,8 @@ def _searches(actor_id: int) -> None:
                 st.rerun()
     if running:
         st.caption(
-            "« Arrêter » marque la recherche en échec. Un traitement déjà en cours se termine en "
-            "arrière-plan sans modifier la recherche ; une recherche en attente ne sera pas lancée."
+            "« Arrêter » marque la recherche en échec. Un traitement en cours s'interrompt dès la fin "
+            "de l'appel en cours (IA ou site d'annonces) ; une recherche en attente ne sera pas lancée."
         )
 
     st.markdown("#### Derniers échecs")
@@ -178,6 +178,8 @@ def _health() -> None:
     with st.container(border=True):
         _check_line(db)
         _check_line(sv.check_ollama())
+        if (remote := sv.check_remote_llm()) is not None:
+            _check_line(remote)
         _check_line(_event_check("Relève des alertes e-mail", "mail_sync", "jamais lancée"))
         _check_line(
             _event_check(

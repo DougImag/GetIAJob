@@ -125,7 +125,7 @@ def extract_text(data: bytes, file_name: str) -> str:
     return extract_cv_text(data, file_name)
 
 
-def _run_task(name: str, text: str, progress: Progress = _noop) -> BaseModel | None:
+def _run_task(name: str, text: str, progress: Progress = _noop) -> BaseModel | Exception:
     # La consigne vient AVANT le CV : placer le CV en tête (pour le cache de prompt d'Ollama) fait perdre
     # des expériences et les dates (mesuré : 7 expériences sans dates au lieu de 12 avec qwen2.5:7b).
     schema, instruction = TASKS[name]
@@ -139,7 +139,7 @@ def _run_task(name: str, text: str, progress: Progress = _noop) -> BaseModel | N
     except Exception as exc:  # une section ratée ne doit pas faire échouer toute l'analyse
         log.warning("Extraction « %s » impossible : %s", name, exc)
         progress(name, "failed")
-        return None
+        return exc
     progress(name, "done")
     return result
 
@@ -274,9 +274,12 @@ def extract_profile(text: str, progress: Progress = _noop) -> CVProfile:
     workers = max(1, get_settings().llm_concurrency)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {name: pool.submit(_run_task, name, text, progress) for name in TASKS}
-        parts = {name: future.result() for name, future in futures.items()}
-    if all(part is None for part in parts.values()):
-        raise RuntimeError("Le LLM n'a pu extraire aucune section du CV (Ollama démarré ?).")
+        results = {name: future.result() for name, future in futures.items()}
+    errors = [r for r in results.values() if isinstance(r, Exception)]
+    if len(errors) == len(results):
+        cause = f"{type(errors[0]).__name__} : {errors[0]}"[:300]
+        raise RuntimeError(f"Le LLM n'a pu extraire aucune section du CV ({cause}).")
+    parts = {name: None if isinstance(r, Exception) else r for name, r in results.items()}
 
     identity = parts["identity"] or IdentityExtraction()
     experiences = parts["experiences"] or ExperienceExtraction()

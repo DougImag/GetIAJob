@@ -7,7 +7,7 @@ from html import escape
 import streamlit as st
 
 from getiajob.config import get_settings
-from getiajob.scraping.base import SOURCE_LABELS, configured_sources
+from getiajob.scraping.base import SOURCE_CHOICE_LABELS, configured_sources
 from getiajob.services.feedback import build_digest, delete_feedback, list_feedback
 from getiajob.services.users import ProfileData, SessionUser, get_profile, save_profile
 from getiajob.web.layout import (
@@ -33,7 +33,8 @@ SECTIONS = {
 def render() -> None:
     user = require_user()
     st.markdown("## Mon profil")
-    st.session_state.setdefault(PROFILE_SECTION_KEY, "cv")
+    if st.session_state.get(PROFILE_SECTION_KEY) not in SECTIONS:  # ex. ancien onglet « alertes »
+        st.session_state[PROFILE_SECTION_KEY] = "cv"
     section = st.segmented_control(
         "Section",
         options=list(SECTIONS),
@@ -124,8 +125,12 @@ def _summary(p: ProfileData) -> None:
         chips.append(chip("user", ", ".join(EXPERIENCE_LABELS.get(e, e) for e in p.experience_levels)))
     if p.min_salary:
         chips.append(chip("euro", f"≥ {p.min_salary:,} € brut/an".replace(",", "\u202f")))
-    srcs = [s for s in (p.sources if p.sources is not None else configured_sources()) if s in SOURCE_LABELS]
-    chips.append(chip("globe", " · ".join(SOURCE_LABELS[s] for s in srcs) or "Aucune source", not srcs))
+    srcs = [
+        s for s in (p.sources if p.sources is not None else configured_sources()) if s in SOURCE_CHOICE_LABELS
+    ]
+    chips.append(
+        chip("globe", " · ".join(SOURCE_CHOICE_LABELS[s] for s in srcs) or "Aucune source", not srcs)
+    )
     n_excl = len(p.exclude_keywords) + len(p.exclude_companies)
     if n_excl:
         chips.append(chip("ban", f"{n_excl} exclusion(s)"))
@@ -170,10 +175,10 @@ def render_fiche(user: SessionUser) -> None:
             sources = sources_input("Sources d'annonces", p.sources, key="fiche_sources")
             if "apec" in configured_sources():
                 st.caption(
-                    f":material/forward_to_inbox: **Alertes APEC** : transfère-les à "
+                    f":material/forward_to_inbox: **Alertes e-mail** (APEC, Free-Work…) : transfère-les à "
                     f"**{get_settings().imap_user}** depuis **{user.email}** (l'adresse de ton compte), "
                     "à la main ou avec une règle de transfert automatique. Les offres reçues ne sont "
-                    "visibles que par toi."
+                    "visibles que par toi. Tout se gère dans **Mes alertes e-mail** (menu de gauche)."
                 )
 
         with st.container(border=True, key="gj_fs_cond"):

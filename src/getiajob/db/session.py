@@ -122,6 +122,21 @@ UPGRADES = [
     "ALTER TABLE job_applications ADD COLUMN IF NOT EXISTS summary TEXT",
     # v0.12.2 : avancement détaillé de l'analyse du CV (étapes, estimation du temps restant)
     "ALTER TABLE cv_profiles ADD COLUMN IF NOT EXISTS analysis_progress JSONB",
+    # v0.12.3 : options du formulaire de recherche mémorisées
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS search_options JSONB",
+    # v0.12.3 : types d'alertes e-mail par utilisateur (APEC, Free-Work…)
+    "ALTER TABLE mail_imports ADD COLUMN IF NOT EXISTS mail_type VARCHAR(255)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_mail_import_at TIMESTAMPTZ",
+    "UPDATE mail_imports SET mail_type = 'apec.fr' WHERE mail_type IS NULL AND status = 'imported'",
+    # Mails classés « pas une alerte APEC » avant les types de mail : relus une fois pour détecter leur type
+    "DELETE FROM mail_imports WHERE status = 'not_alert' AND mail_type IS NULL AND created_at < '2026-11-20'",
+    """
+    INSERT INTO mail_types (user_id, domain, label, status, n_mails, n_offers, last_seen_at, created_at)
+    SELECT user_id, 'apec.fr', 'APEC', 'enabled', count(*), sum(n_offers), max(received_at), now()
+    FROM mail_imports WHERE status = 'imported' AND mail_type = 'apec.fr' AND user_id IS NOT NULL
+    GROUP BY user_id
+    ON CONFLICT ON CONSTRAINT uq_mail_type_user_domain DO NOTHING
+    """,
 ]
 
 

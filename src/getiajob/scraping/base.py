@@ -18,6 +18,10 @@ SOURCE_LABELS = {
     "apec": "APEC",
 }
 ALL_SOURCES = list(SOURCE_LABELS)
+# Libellés dans les choix de sources (fiche, recherche) : « apec » couvre toutes les alertes e-mail
+SOURCE_CHOICE_LABELS = {**SOURCE_LABELS, "apec": "Alertes e-mail"}
+# Libellés des offres : « mail » = offre d'une alerte e-mail d'un autre site (Free-Work…)
+OFFER_SOURCE_LABELS = {**SOURCE_LABELS, "mail": "Alerte e-mail"}
 
 
 @dataclass(frozen=True)
@@ -59,9 +63,11 @@ SOURCE_INFO = {
     "apec": SourceInfo(
         kind="Alertes e-mail (IMAP)",
         site="https://www.apec.fr",
-        description="Alertes APEC transférées par chaque utilisateur vers la boîte de GetIAJob. Les offres "
-        "sont rattachées à l'expéditeur (adresse de son compte) et visibles de lui seul. Intitulé, "
-        "entreprise, contrat et lieu ; pas de description complète.",
+        description="Alertes e-mail (APEC, Free-Work, Indeed…) transférées par chaque utilisateur vers la "
+        "boîte de GetIAJob. Les offres sont rattachées à l'expéditeur (adresse de son compte) et visibles "
+        "de lui seul. APEC reconnue d'office ; tout autre site est un « type de mail » que l'utilisateur "
+        "ajoute (page Mes alertes e-mail), ses offres étant alors extraites par le LLM. Intitulé, "
+        "entreprise, contrat, lieu, salaire ; pas de description complète.",
         env_vars=("IMAP_HOST", "IMAP_USER", "IMAP_PASSWORD"),
     ),
 }

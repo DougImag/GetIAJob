@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://getiajob:getiajob@db:5432/getiajob"
 
     ollama_base_url: str = "http://ollama:11434"
+    # Fournisseur du LLM : « ollama » (local) ou « openai » (toute API compatible OpenAI, ex. OVHcloud
+    # AI Endpoints). Les embeddings restent toujours sur Ollama (EMBEDDING_MODEL).
+    llm_provider: Literal["ollama", "openai"] = "ollama"
+    llm_base_url: str = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"  # si LLM_PROVIDER=openai
+    llm_api_key: str = ""  # vide = accès anonyme (OVH : 1 requête par an et par modèle → clé indispensable)
+    # Sortie structurée côté API OpenAI : « json_schema » (schéma imposé) ou « json_object » (JSON libre,
+    # schéma donné dans le prompt) si le fournisseur ou le modèle refuse json_schema.
+    llm_json_mode: Literal["json_schema", "json_object"] = "json_schema"
+    llm_max_retries: int = 3  # nouvelles tentatives sur erreur réseau / 429 (API distante seulement)
     llm_model: str = "qwen2.5:7b"
     llm_temperature: float = 0.0
     llm_num_ctx: int = 8192
@@ -140,13 +149,17 @@ class Expectations(BaseModel):
 
 class RankingPreferences(BaseModel):
     prefilter_top_k: int = Field(default=30, ge=1, description="Offres envoyées au LLM après tri sémantique")
-    top_n: int = Field(default=10, ge=1)
+    top_n: int = Field(default=20, ge=1)
+    min_score: float = Field(default=60, ge=0, le=100, description="Score final minimum d'une offre retenue")
     llm_weight: float = Field(default=0.7, ge=0, le=1)
     # Avis de l'utilisateur (figés à la création de la recherche) : aucun appel LLM supplémentaire
     hidden_job_ids: list[int] = Field(default_factory=list, description="Offres écartées : exclues")
     liked_job_ids: list[int] = Field(default_factory=list, description="Offres aimées : bonus aux similaires")
     disliked_job_ids: list[int] = Field(
         default_factory=list, description="Offres écartées sur le fond : malus aux offres similaires"
+    )
+    seen_job_ids: list[int] = Field(
+        default_factory=list, description="Offres déjà consultées (« Voir l'offre ») : exclues"
     )
     feedback_points: float = Field(default=10, ge=0, le=30, description="Ajustement max du score (points)")
 

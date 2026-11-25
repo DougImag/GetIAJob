@@ -110,5 +110,18 @@ def impersonation_target(actor_id: int, user_id: int) -> SessionUser:
     return target
 
 
+def impersonation_write_mode(actor_id: int, target_email: str, enabled: bool) -> None:
+    """Autorise (ou retire) les modifications pendant une consultation ; tracé dans le journal d'audit."""
+    if enabled:
+        with session_scope() as session:
+            _require_admin(session, actor_id)
+    audit(
+        actor_id,
+        "user.impersonate_write" if enabled else "user.impersonate_readonly",
+        target_email,
+        "modifications autorisées" if enabled else "retour en lecture seule",
+    )
+
+
 def end_impersonation(actor_id: int, target_email: str) -> None:
     audit(actor_id, "user.impersonate_end", target_email)

@@ -105,7 +105,7 @@ def activity(days: int = 30) -> Activity:
         """
         SELECT date_trunc('day', created_at)::date AS jour,
                CASE status WHEN 'failed' THEN 'Échec' WHEN 'done' THEN 'Terminée'
-                           ELSE 'En cours' END AS statut,
+                           WHEN 'cancelled' THEN 'Arrêtée' ELSE 'En cours' END AS statut,
                count(*) AS n
         FROM search_sessions WHERE created_at >= :since GROUP BY 1, 2 ORDER BY 1
         """,
@@ -191,8 +191,9 @@ def failed_searches(limit: int = 30, email: str | None = None) -> list[SearchRow
 def cancel_search(actor_id: int, search_id: int) -> bool:
     """Marque en échec une recherche en attente ou bloquée.
 
-    Une recherche en attente ne sera pas lancée. Pour une recherche en cours, le traitement ne peut
-    pas être interrompu : il se termine en arrière-plan mais ne modifie plus la recherche.
+    Une recherche en attente ne sera pas lancée. Une recherche en cours s'interrompt à la prochaine
+    vérification (offre collectée ou évaluée) ; un appel déjà engagé (LLM, site d'annonces) se termine
+    d'abord, sans modifier la recherche.
     """
     with session_scope() as session:
         result = session.execute(
@@ -551,11 +552,32 @@ def check_ollama() -> Check:
             loaded = [m["name"] for m in client.get("/api/ps").raise_for_status().json().get("models", [])]
     except Exception as exc:
         return Check("Ollama", False, f"Injoignable ({type(exc).__name__})")
-    missing = [m for m in (s.llm_model, s.embedding_model) if m not in tags and f"{m}:latest" not in tags]
+    # Avec un LLM distant (LLM_PROVIDER=openai), Ollama ne sert plus qu'aux embeddings
+    needed = (s.llm_model, s.embedding_model) if s.llm_provider == "ollama" else (s.embedding_model,)
+    missing = [m for m in needed if m not in tags and f"{m}:latest" not in tags]
     detail = f"{len(tags)} modèle(s) installé(s) · en mémoire : {', '.join(loaded) or 'aucun'}"
     if missing:
         return Check("Ollama", False, f"Modèle(s) manquant(s) : {', '.join(missing)} · {detail}")
     return Check("Ollama", True, detail, time.monotonic() - start)
+
+
+def check_remote_llm() -> Check | None:
+    """API compatible OpenAI (LLM_PROVIDER=openai) : joignable et modèle proposé. None si LLM sur Ollama."""
+    s = get_settings()
+    if s.llm_provider != "openai":
+        return None
+    start = time.monotonic()
+    headers = {"Authorization": f"Bearer {s.llm_api_key}"} if s.llm_api_key else {}
+    try:
+        with httpx.Client(timeout=10, headers=headers) as client:
+            data = client.get(f"{s.llm_base_url.rstrip('/')}/models").raise_for_status().json()
+    except Exception as exc:
+        return Check("LLM distant", False, f"Injoignable ({type(exc).__name__}) · {s.llm_base_url}")
+    ids = {m.get("id") for m in data.get("data", [])}
+    access = "clé API" if s.llm_api_key else "sans clé API (accès anonyme très limité)"
+    if ids and s.llm_model not in ids:
+        return Check("LLM distant", False, f"Modèle {s.llm_model} non proposé par {s.llm_base_url}")
+    return Check("LLM distant", True, f"{s.llm_model} · {access}", time.monotonic() - start)
 
 
 def check_mailbox() -> Check:
@@ -591,6 +613,8 @@ AUDIT_LABELS = {
     "user.delete": "Compte supprimé",
     "user.impersonate": "Consultation d'un compte (lecture seule)",
     "user.impersonate_end": "Fin de consultation d'un compte",
+    "user.impersonate_write": "Consultation : mode édition activé",
+    "user.impersonate_readonly": "Consultation : retour en lecture seule",
     "search.cancel": "Recherche arrêtée",
     "search.retry": "Recherche relancée",
     "offers.purge": "Offres purgées",

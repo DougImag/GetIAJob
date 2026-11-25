@@ -172,6 +172,9 @@ def detect(now: datetime | None = None) -> list[Finding]:
     ollama = supervision.check_ollama()
     if not ollama.ok:
         found.append(Finding("ollama.down", "critical", f"Ollama : {ollama.detail}"))
+    remote = supervision.check_remote_llm()
+    if remote is not None and not remote.ok:
+        found.append(Finding("llm.down", "critical", f"LLM distant : {remote.detail}"))
     return found
 
 
@@ -334,13 +337,15 @@ def _smtp_settings() -> tuple[str, int, str, str]:
     return host, s.smtp_port, user, password
 
 
-def send_mail(to: list[str], subject: str, body: str) -> None:
+def send_mail(to: list[str], subject: str, body: str, html: str | None = None) -> None:
     host, port, user, password = _smtp_settings()
     msg = EmailMessage()
     msg["From"] = f"GetIAJob <{user}>"
     msg["To"] = ", ".join(to)
     msg["Subject"] = subject
     msg.set_content(body)
+    if html:
+        msg.add_alternative(html, subtype="html")
     context = ssl.create_default_context()
     if port == 465:
         with smtplib.SMTP_SSL(host, port, context=context, timeout=30) as smtp:

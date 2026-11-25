@@ -48,6 +48,8 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Dernier import des alertes e-mail lancé à la main (limité à un toutes les 5 min hors admin)
+    last_mail_import_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     profile: Mapped[UserProfile | None] = relationship(
         back_populates="user", cascade="all, delete-orphan", uselist=False
@@ -109,6 +111,8 @@ class UserProfile(Base):
     exclude_keywords: Mapped[list] = mapped_column(JSONB, default=list)
     exclude_companies: Mapped[list] = mapped_column(JSONB, default=list)
     sources: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # None = toutes les sources
+    # Dernières valeurs du formulaire « Nouvelle recherche » (reprises à la recherche suivante)
+    search_options: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -235,6 +239,30 @@ class SearchSession(Base):
 # --------------------------------------------------------------------------- #
 
 
+class JobPin(Base):
+    """Offre épinglée par un utilisateur (liste à garder sous la main, envoyable par e-mail)."""
+
+    __tablename__ = "job_pins"
+    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_pin_user_job"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("job_offers.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class JobView(Base):
+    """Offre consultée par un utilisateur (clic sur « Voir l'offre » ou sur son titre)."""
+
+    __tablename__ = "job_views"
+    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_view_user_job"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("job_offers.id", ondelete="CASCADE"))
+    viewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class JobFeedback(Base):
     """Avis d'un utilisateur sur une offre : « j'aime » (+1) ou « pas pour moi » (-1),
     motifs et commentaire libre.
@@ -274,8 +302,33 @@ class MailImport(Base):
     sender: Mapped[str | None] = mapped_column(String(255))
     subject: Mapped[str | None] = mapped_column(String(500))
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    status: Mapped[str] = mapped_column(String(30))  # imported, unknown_sender, unverified, not_alert
+    # imported, unknown_sender, unverified, not_alert, new_type, ignored_type
+    status: Mapped[str] = mapped_column(String(30))
+    mail_type: Mapped[str | None] = mapped_column(String(255))  # domaine de l'émetteur (free-work.com…)
     n_offers: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MailType(Base):
+    """Type d'alerte e-mail reçu par un utilisateur (un par site émetteur : APEC, Free-Work…).
+
+    Un type inconnu est créé « à valider » à sa première réception ; l'utilisateur l'active (ses offres
+    sont alors importées, y compris celles des mails déjà reçus) ou l'ignore.
+    """
+
+    __tablename__ = "mail_types"
+    __table_args__ = (UniqueConstraint("user_id", "domain", name="uq_mail_type_user_domain"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    domain: Mapped[str] = mapped_column(String(255))
+    label: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, enabled, ignored
+    sample_sender: Mapped[str | None] = mapped_column(String(255))
+    sample_subject: Mapped[str | None] = mapped_column(String(500))
+    n_mails: Mapped[int] = mapped_column(Integer, default=0)
+    n_offers: Mapped[int] = mapped_column(Integer, default=0)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

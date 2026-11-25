@@ -6,11 +6,19 @@ from datetime import UTC, date, datetime
 from html import escape
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from getiajob.db import SearchSession
 from getiajob.report import render_markdown
-from getiajob.scraping.base import SOURCE_LABELS
-from getiajob.services.applications import ApplicationError, AppliedMark, applied_map, mark_applied
+from getiajob.scraping.base import OFFER_SOURCE_LABELS
+from getiajob.services.applications import (
+    STATUS_COLORS,
+    STATUSES,
+    ApplicationError,
+    AppliedMark,
+    applied_map,
+    mark_applied,
+)
 from getiajob.services.cvs import list_cvs
 from getiajob.services.feedback import (
     DISLIKE,
@@ -22,6 +30,7 @@ from getiajob.services.feedback import (
     feedback_map,
     set_feedback,
 )
+from getiajob.services.pins import pinned_ids, send_pins, set_pin
 from getiajob.services.searches import (
     STATUS_LABELS,
     STEP_LABELS,
@@ -29,15 +38,20 @@ from getiajob.services.searches import (
     get_search,
     list_searches,
     queue_position,
+    relaunch_search,
     rerank_search,
+    stop_search,
 )
+from getiajob.services.seen import mark_seen, seen_map
+from getiajob.services.users import SessionUser
 from getiajob.web.layout import EXPERIENCE_LABELS, FRESHNESS_LABELS, REMOTE_LABELS, score_color
-from getiajob.web.state import APPLICATION_FOCUS_KEY, get_runner, go, page, require_user
+from getiajob.web.layout import badges as layout_badges
+from getiajob.web.state import APPLICATION_FOCUS_KEY, get_runner, go, is_read_only, page, require_user
 
 SHORT_SKILL = 32  # au-delà, une « compétence » est une phrase : pas affichée sur la carte
 VERDICTS = {"green": "Très pertinent", "orange": "Pertinent", "red": "Peu pertinent"}
 COLORS = {"green": "#16a34a", "orange": "#ea580c", "red": "#dc2626"}
-STATUS_STYLE = {"done": "ok", "failed": "ko", "running": "run", "pending": "run"}
+STATUS_STYLE = {"done": "ok", "failed": "ko", "running": "run", "pending": "run", "cancelled": "off"}
 
 # Icônes Lucide (https://lucide.dev, licence ISC)
 ICONS = {
@@ -61,6 +75,8 @@ ICONS = {
     '<path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
     "user": '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
     "check": '<path d="M20 6 9 17l-5-5"/>',
+    "eye": '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 '
+    '10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
     "alert": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>'
     '<path d="M12 9v4"/><path d="M12 17h.01"/>',
     "sliders": '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" '
@@ -87,6 +103,7 @@ CSS = """
   .gj-status.ok { background: #dcfce7; color: #166534; }
   .gj-status.ko { background: #fee2e2; color: #991b1b; }
   .gj-status.run { background: #e0e7ff; color: #3730a3; }
+  .gj-status.off { background: #f3f4f6; color: #4b5563; }
   .gj-sh-sub { color: #6b7280; font-size: .88rem; margin: .25rem 0 .8rem; display: flex; gap: 1rem;
     flex-wrap: wrap; }
   .gj-sh-sub span, .gj-chip, .gj-meta span { display: inline-flex; align-items: center; gap: .35rem; }
@@ -105,6 +122,18 @@ CSS = """
   [class*="st-key-gj_card_"] {
     border-radius: 16px !important; transition: box-shadow .2s ease, border-color .2s ease;
   }
+  /* Offre épinglée : liseré ambre sur la carte (couleurs des boutons : voir TONES) */
+  [class*="st-key-gj_card_"]:has([class*="_pin_on_"]),
+  [class*="st-key-gj_card_"]:has([class*="_pin_on_"]):hover {
+    border-left: 4px solid #f59e0b !important; }
+  /* Offre déjà consultée : carte grisée, titre atténué, pastille « Consultée le … » */
+  [class*="st-key-gj_card_"]:has(.gj-seen) { background: color-mix(in srgb, #6b7280 7%, transparent); }
+  [class*="st-key-gj_card_"]:has(.gj-seen) .gj-card-title a { color: #6b7280; font-weight: 600; }
+  .gj-seen { display: inline-flex; align-items: center; gap: .3rem; font-size: .72rem; font-weight: 600;
+    padding: .1rem .5rem; border-radius: 999px; color: #4b5563;
+    background: color-mix(in srgb, #6b7280 15%, transparent); }
+  /* Bouton technique « consultée », cliqué par le script SEEN_JS : jamais affiché */
+  [class*="st-key-gj_seen_"] { display: none !important; }
   [class*="st-key-gj_card_"]:hover { border-color: rgba(79, 70, 229, .35) !important;
     box-shadow: 0 14px 34px -20px rgba(49, 46, 129, .45); }
   .gj-card { display: flex; gap: 1.1rem; align-items: flex-start; }
@@ -154,6 +183,38 @@ CSS = """
   @media (max-width: 900px) { .gj-kpis { grid-template-columns: repeat(2, 1fr); } }
 </style>
 """
+
+# Couleurs des boutons d'état d'une carte, portées par leur clé :
+# « gj_tone_<couleur>_… » = état actif (fond teinté), « gj_hover_<couleur>_… » = couleur au survol.
+TONES = {
+    "amber": "#d97706",
+    "blue": "#2563eb",
+    "violet": "#7c3aed",
+    "orange": "#ea580c",
+    "green": "#16a34a",
+    "red": "#dc2626",
+    "gray": "#6b7280",
+}
+
+
+def _tone_css() -> str:
+    rules = []
+    for name, c in TONES.items():
+        tone, hover = (
+            f'[class*="st-key-gj_tone_{name}_"] button',
+            f'[class*="st-key-gj_hover_{name}_"] button',
+        )
+        rules.append(
+            f"{tone} {{ background: color-mix(in srgb, {c} 13%, transparent); "
+            f"border-color: color-mix(in srgb, {c} 55%, transparent); color: {c}; font-weight: 600; }}\n"
+            f"{tone}:hover {{ background: color-mix(in srgb, {c} 22%, transparent); border-color: {c}; "
+            f"color: {c}; }}\n"
+            f"{hover}:hover {{ border-color: color-mix(in srgb, {c} 55%, transparent); color: {c}; }}"
+        )
+    return "\n".join(rules)
+
+
+CSS = CSS.replace("</style>", _tone_css() + "\n</style>")
 
 
 def _label(s: SearchSession) -> str:
@@ -219,6 +280,8 @@ def _criteria_chips(s: SearchSession) -> str:
         ("map-pin", ", ".join(search.get("locations", [])) or "Toutes localisations"),
         ("list", f"Top {ranking.get('top_n', '?')}"),
     ]
+    if min_score := ranking.get("min_score"):
+        chips.append(("check", f"Score ≥ {min_score:.0f}"))
     if remote := search.get("remote"):
         chips.append(("house", " / ".join(REMOTE_LABELS.get(r, r) for r in remote)))
     if levels := search.get("experience_levels"):
@@ -230,13 +293,38 @@ def _criteria_chips(s: SearchSession) -> str:
     if ranking.get("hidden_job_ids") or ranking.get("liked_job_ids"):
         n = len(ranking.get("hidden_job_ids", [])) + len(ranking.get("liked_job_ids", []))
         chips.append(("sliders", f"{n} avis pris en compte"))
+    if n_seen := len(ranking.get("seen_job_ids", [])):
+        chips.append(("eye", f"{n_seen} offre(s) déjà consultée(s) écartée(s)"))
     return "".join(f'<span class="gj-chip">{icon(i, 13)}{escape(t)}</span>' for i, t in chips)
 
 
-def _search_header(user_id: int, s: SearchSession) -> None:
+def _send_pins_button(user: SessionUser, s: SearchSession, n_pins: int) -> None:
+    """Envoie à l'utilisateur, par e-mail, les liens de ses offres épinglées."""
+    if n_pins:
+        help_text = f"M'envoyer par e-mail ({user.email}) les liens de mes {n_pins} offre(s) épinglée(s)"
+    else:
+        help_text = "Épingle des offres (icône sur chaque carte) pour te les envoyer par e-mail"
+    if st.button(
+        f"Envoyer ({n_pins})" if n_pins else "Envoyer",
+        icon=":material/forward_to_inbox:",
+        disabled=not n_pins or is_read_only(),
+        help=help_text,
+        key=f"send-pins-{s.id}",
+    ):
+        scores = {r["job_id"]: r["final_score"] for r in s.results or [] if r.get("job_id")}
+        try:
+            sent = send_pins(user.id, user.email, scores)
+        except Exception as exc:  # SMTP non configuré, refus du serveur…
+            st.error(f"Envoi impossible : {exc}", icon=":material/error:")
+        else:
+            st.toast(f"{sent} offre(s) envoyée(s) à {user.email}", icon=":material/mark_email_read:")
+
+
+def _search_header(user: SessionUser, s: SearchSession, n_pins: int = 0) -> None:
+    user_id = user.id
     cv = next((c for c in list_cvs(user_id) if c.id == s.cv_id), None)
     with st.container(border=True):
-        head, actions = st.columns([5, 2], vertical_alignment="top")
+        head, actions = st.columns([3, 2], vertical_alignment="top")
         sub = [f"<span>{icon('calendar')} {s.created_at:%d/%m/%Y à %H:%M}</span>"]
         if cv:
             sub.append(f"<span>{icon('file')} {escape(cv.file_name)}</span>")
@@ -258,7 +346,19 @@ def _search_header(user_id: int, s: SearchSession) -> None:
                     icon=":material/download:",
                     help="Télécharger le rapport Markdown",
                 )
-            if s.status in ("done", "failed"):
+                _send_pins_button(user, s, n_pins)
+            if s.status in ("pending", "running"):
+                if st.button(
+                    "Arrêter",
+                    icon=":material/stop_circle:",
+                    disabled=is_read_only(),
+                    help="Interrompre cette recherche (l'appel en cours à l'IA ou au site finit d'abord)",
+                    key=f"stop-search-{s.id}",
+                ):
+                    if stop_search(user_id, s.id):
+                        st.toast("Recherche arrêtée.", icon=":material/stop_circle:")
+                    st.rerun()
+            if s.status in ("done", "failed", "cancelled"):
                 with st.popover("", icon=":material/delete:", help="Supprimer cette recherche"):
                     st.write("Supprimer cette recherche de l'historique ?")
                     if st.button("Confirmer", type="primary", key=f"del-search-{s.id}"):
@@ -290,16 +390,22 @@ def _kpis(s: SearchSession, results: list[dict]) -> None:
 # Carte d'une offre
 # --------------------------------------------------------------------------- #
 
-SOURCE_COLORS = {"linkedin": "#0a66c2", "francetravail": "#e2001a", "adzuna": "#16a34a", "apec": "#7c3aed"}
+SOURCE_COLORS = {
+    "linkedin": "#0a66c2",
+    "francetravail": "#e2001a",
+    "adzuna": "#16a34a",
+    "apec": "#7c3aed",
+    "mail": "#db2777",
+}
 
 
-def _card_header(rank: int, r: dict) -> str:
+def _card_header(rank: int, r: dict, seen_at: datetime | None = None) -> str:
     color = score_color(r["final_score"])
     meta = []
     source = r.get("source") or "linkedin"
     meta.append(
         f'<span class="gj-src" style="--sc:{SOURCE_COLORS.get(source, "#6b7280")}">'
-        f"{escape(SOURCE_LABELS.get(source, source))}</span>"
+        f"{escape(OFFER_SOURCE_LABELS.get(source, source))}</span>"
     )
     if r.get("company"):
         meta.append(f"<span>{icon('building')} {escape(r['company'])}</span>")
@@ -333,7 +439,14 @@ def _card_header(rank: int, r: dict) -> str:
         f"<div><b>{r['final_score']:.0f}</b><small>/ 100</small></div></div>"
         f'<div class="gj-card-body"><div class="gj-card-title"><span class="gj-rank">#{rank}</span>'
         f'<a href="{escape(r["url"], quote=True)}" target="_blank" rel="noopener">'
-        f"{escape(r['title'])}</a></div>"
+        f"{escape(r['title'])}</a>"
+        + (
+            f'<span class="gj-seen" title="Annonce ouverte le {seen_at.astimezone():%d/%m/%Y à %H:%M}">'
+            f"{icon('eye', 12)} Consultée le {seen_at.astimezone():%d/%m}</span>"
+            if seen_at
+            else ""
+        )
+        + "</div>"
         f'<div class="gj-meta">{"".join(meta)}</div>{summary}'
         f"{f'<div class=gj-skills>{skills}</div>' if skills else ''}{adj_html}</div></div>"
     )
@@ -381,21 +494,31 @@ def _feedback_controls(user_id: int, search_id: int, r: dict, fb: Feedback | Non
         return
     uid = f"{search_id}-{job_id}"
     if fb is not None:
-        if fb.liked:
-            text = ":green-badge[:material/thumb_up: Tu as aimé cette offre]"
-        else:
-            text = ":red-badge[:material/thumb_down: Écartée]"
+        tone, label, ico = (
+            ("green", "Aimée", ":material/thumb_up:")
+            if fb.liked
+            else ("red", "Écartée", ":material/thumb_down:")
+        )
+        key = uid.replace("-", "_")
+        with st.popover(label, icon=ico, key=f"gj_tone_{tone}_fb_{key}"):
+            st.markdown(
+                "**Tu as aimé cette offre** : les offres similaires sont favorisées."
+                if fb.liked
+                else "**Offre écartée** : elle ne te sera plus proposée."
+            )
             if fb.reasons:
-                text += " :gray[" + ", ".join(fb.reason_labels) + "]"
-        if fb.comment:
-            text += f" :gray[— « {fb.comment.replace('[', '(').replace(']', ')')} »]"
-        st.markdown(text)
-        if st.button("Retirer mon avis", icon=":material/undo:", key=f"undo-{uid}", type="tertiary"):
-            delete_feedback(user_id, job_id)
-            st.rerun()
+                st.markdown(layout_badges(fb.reason_labels, "red"))
+            if fb.comment:
+                st.caption(f"« {fb.comment} »")
+            if st.button(
+                "Retirer mon avis", icon=":material/undo:", key=f"undo-{uid}", disabled=is_read_only()
+            ):
+                delete_feedback(user_id, job_id)
+                st.rerun()
         return
 
-    with st.popover("J'aime", icon=":material/thumb_up:", key=f"like-{uid}"):
+    key = uid.replace("-", "_")
+    with st.popover("J'aime", icon=":material/thumb_up:", key=f"gj_hover_green_like_{key}"):
         with st.form(f"like-form-{uid}", border=False):
             comment = st.text_area(
                 "Qu'est-ce qui te plaît ? (optionnel)",
@@ -406,7 +529,7 @@ def _feedback_controls(user_id: int, search_id: int, r: dict, fb: Feedback | Non
                 set_feedback(user_id, job_id, LIKE, comment=comment, search_id=search_id)
                 st.toast("Merci ! Les offres similaires seront favorisées.", icon=":material/thumb_up:")
                 st.rerun()
-    with st.popover("Pas pour moi", icon=":material/thumb_down:", key=f"dislike-{uid}"):
+    with st.popover("Pas pour moi", icon=":material/thumb_down:", key=f"gj_hover_red_dislike_{key}"):
         with st.form(f"dislike-form-{uid}", border=False):
             reasons = st.pills(
                 "Pourquoi ?", options=list(REASONS), format_func=REASONS.get, selection_mode="multi"
@@ -427,6 +550,24 @@ def _feedback_controls(user_id: int, search_id: int, r: dict, fb: Feedback | Non
                 st.rerun()
 
 
+# Icône du bouton de candidature selon son statut (« Mes candidatures »)
+STATUS_ICONS = {
+    "applied": ":material/assignment_turned_in:",
+    "interview": ":material/groups:",
+    "offer": ":material/redeem:",
+    "accepted": ":material/verified:",
+    "rejected": ":material/cancel:",
+    "withdrawn": ":material/block:",
+}
+
+
+def applied_label(mark: AppliedMark) -> str:
+    """« Postulé le 18/11/2026 », ou le statut actuel de la candidature s'il a évolué."""
+    if mark.status == "applied":
+        return f"Postulé le {mark.applied_on:%d/%m/%Y}"
+    return STATUSES.get(mark.status, mark.status)
+
+
 def _applied_controls(user_id: int, search_id: int, r: dict, mark: AppliedMark | None) -> None:
     """« J'ai postulé » : la candidature se suit ensuite dans « Mes candidatures »."""
     job_id = r.get("job_id")
@@ -434,16 +575,19 @@ def _applied_controls(user_id: int, search_id: int, r: dict, mark: AppliedMark |
         return
     uid = f"{search_id}-{job_id}"
     if mark is not None:
+        tone = STATUS_COLORS.get(mark.status, "blue")
         if st.button(
-            f"Postulé le {mark.applied_on:%d/%m/%Y}",
-            icon=":material/assignment_turned_in:",
-            key=f"applied-{uid}",
-            help="Ouvrir le suivi de cette candidature",
+            applied_label(mark),
+            icon=STATUS_ICONS.get(mark.status, ":material/assignment_turned_in:"),
+            key=f"gj_tone_{tone}_applied_{uid.replace('-', '_')}",
+            help=f"Candidature du {mark.applied_on:%d/%m/%Y} — ouvrir son suivi",
         ):
             st.session_state[APPLICATION_FOCUS_KEY] = mark.id
             go("applications")
         return
-    with st.popover("J'ai postulé", icon=":material/send:", key=f"apply-{uid}"):
+    with st.popover(
+        "J'ai postulé", icon=":material/send:", key=f"gj_hover_blue_apply_{uid.replace('-', '_')}"
+    ):
         with st.form(f"apply-form-{uid}", border=False):
             on = st.date_input("Date de candidature", date.today(), format="DD/MM/YYYY")
             comment = st.text_area(
@@ -471,17 +615,67 @@ def _applied_controls(user_id: int, search_id: int, r: dict, mark: AppliedMark |
                     st.rerun()
 
 
+def _pin_button(user_id: int, search_id: int, r: dict, pinned: bool) -> None:
+    job_id = r.get("job_id")
+    if not job_id:
+        return
+    # La clé porte la couleur (voir TONES) : ambre quand l'offre est épinglée
+    if st.button(
+        "Épinglée" if pinned else "Épingler",
+        icon=":material/push_pin:",
+        help="Retirer l'épingle" if pinned else "Garder cette offre de côté (envoyable par e-mail)",
+        disabled=is_read_only(),
+        key=f"gj_tone_amber_pin_on_{search_id}_{job_id}"
+        if pinned
+        else f"gj_hover_amber_pin_off_{search_id}_{job_id}",
+    ):
+        set_pin(user_id, job_id, not pinned)
+        st.rerun()
+
+
 def _result_card(
-    rank: int, r: dict, user_id: int, search_id: int, fb: Feedback | None, mark: AppliedMark | None = None
+    rank: int,
+    r: dict,
+    user_id: int,
+    search_id: int,
+    fb: Feedback | None,
+    mark: AppliedMark | None = None,
+    pinned: bool = False,
+    seen_at: datetime | None = None,
 ) -> None:
     with st.container(border=True, key=f"gj_card_{search_id}_{rank}"):
-        st.markdown(_card_header(rank, r), unsafe_allow_html=True)
+        st.markdown(_card_header(rank, r, seen_at), unsafe_allow_html=True)
         with st.expander("Analyse détaillée", icon=":material/insights:"):
             _analysis(r)
         with st.container(horizontal=True, vertical_alignment="center", gap="small"):
             st.link_button("Voir l'offre", r["url"], icon=":material/open_in_new:", type="primary")
             _applied_controls(user_id, search_id, r, mark)
             _feedback_controls(user_id, search_id, r, fb)
+            _pin_button(user_id, search_id, r, pinned)
+        # Invisible : cliqué par SEEN_JS quand l'annonce est ouverte (« Voir l'offre » ou titre)
+        if seen_at is None and r.get("job_id") and not is_read_only():
+            if st.button("Consultée", key=f"gj_seen_{search_id}_{r['job_id']}"):
+                mark_seen(user_id, r["job_id"])
+                st.rerun()
+
+
+# Un clic (ou clic molette) sur un lien d'une carte ouvre l'annonce normalement, puis clique le bouton
+# invisible « consultée » de la carte pour l'enregistrer. Écouteur posé une seule fois sur la page.
+SEEN_JS = """<script>
+const d = window.parent.document;
+if (!d.gjSeenHook) {
+  d.gjSeenHook = true;
+  const onOpen = (e) => {
+    if (e.type === "auxclick" && e.button !== 1) return;
+    const card = e.target.closest && e.target.closest('[class*="st-key-gj_card_"]');
+    if (!card || !e.target.closest("a[href]")) return;
+    const btn = card.querySelector('[class*="st-key-gj_seen_"] button');
+    if (btn) setTimeout(() => btn.click(), 0);
+  };
+  d.addEventListener("click", onOpen, true);
+  d.addEventListener("auxclick", onOpen, true);
+}
+</script>"""
 
 
 # --------------------------------------------------------------------------- #
@@ -509,7 +703,8 @@ def render() -> None:
     st.session_state["selected_search"] = choice.id
     s = get_search(user.id, choice.id)
 
-    _search_header(user.id, s)
+    pins = pinned_ids(user.id)
+    _search_header(user, s, len(pins))
 
     if s.status in ("pending", "running"):
         _live_status(user.id, s.id)
@@ -517,6 +712,25 @@ def render() -> None:
     if s.status == "failed":
         st.error(f"La recherche a échoué : {s.error}", icon=":material/error:")
         st.caption("Vérifie qu'Ollama est démarré et que les modèles sont téléchargés, puis relance.")
+        return
+    if s.status == "cancelled":
+        when = f" le {s.finished_at.astimezone():%d/%m/%Y à %H:%M}" if s.finished_at else ""
+        st.info(
+            f"Recherche arrêtée{when}. Les offres déjà collectées restent en base pour tes prochaines "
+            "recherches.",
+            icon=":material/stop_circle:",
+        )
+        if st.button(
+            "Relancer",
+            icon=":material/replay:",
+            type="primary",
+            disabled=is_read_only(),
+            help="Relancer cette recherche avec les mêmes critères",
+            key=f"relaunch-search-{s.id}",
+        ):
+            if relaunch_search(user.id, s.id):
+                get_runner().submit_search(s.id)
+            st.rerun()
         return
 
     results = s.results or []
@@ -530,6 +744,7 @@ def render() -> None:
 
     feedback = feedback_map(user.id)
     applied = applied_map(user.id)
+    seen = seen_map(user.id)
     rated = [r for r in results if r.get("job_id") in feedback]
     with st.container(border=True):
         c1, c2 = st.columns([3, 1], vertical_alignment="center")
@@ -556,7 +771,7 @@ def render() -> None:
 
     # Filtres
     counts = {k: sum(1 for r in results if score_color(r["final_score"]) == k) for k in VERDICTS}
-    f1, f2, f3 = st.columns([3, 2, 1.4], vertical_alignment="bottom")
+    f1, f2, f3, f4 = st.columns([1.8, 1.5, 1.6, 1.9], vertical_alignment="bottom")
     present = [k for k in VERDICTS if counts[k]]
     verdicts = f1.pills(
         "Pertinence",
@@ -568,6 +783,12 @@ def render() -> None:
     )
     min_score = f2.slider("Score minimum", 0, 100, 0, step=5, key=f"min-score-{s.id}")
     hide_rejected = f3.toggle("Masquer les offres écartées", value=True)
+    hide_seen = f4.toggle(
+        "Masquer les offres déjà consultées",
+        value=False,
+        key="hide-seen-results",
+        help="Offres déjà ouvertes avec « Voir l'offre » ou leur titre",
+    )
 
     shown = [
         (rank, r)
@@ -576,6 +797,23 @@ def render() -> None:
         and score_color(r["final_score"]) in (verdicts or [])
         and not (hide_rejected and (fb := feedback.get(r.get("job_id"))) and not fb.liked)
     ]
-    st.caption(f"{len(shown)} offre(s) affichée(s) sur {len(results)}")
+    n_seen = sum(1 for _, r in shown if r.get("job_id") in seen)
+    if hide_seen:
+        shown = [(rank, r) for rank, r in shown if r.get("job_id") not in seen]
+    st.caption(
+        f"{len(shown)} offre(s) affichée(s) sur {len(results)}"
+        + (f" · {n_seen} déjà consultée(s)" + (" masquée(s)" if hide_seen else "") if n_seen else "")
+    )
+    components.html(SEEN_JS, height=0)
     for rank, r in shown:
-        _result_card(rank, r, user.id, s.id, feedback.get(r.get("job_id")), applied.get(r.get("job_id")))
+        job_id = r.get("job_id")
+        _result_card(
+            rank,
+            r,
+            user.id,
+            s.id,
+            feedback.get(job_id),
+            applied.get(job_id),
+            pinned=job_id in pins,
+            seen_at=seen.get(job_id),
+        )

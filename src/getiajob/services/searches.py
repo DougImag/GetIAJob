@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
 
 from getiajob.config import Expectations, Preferences, RankingPreferences, load_preferences
-from getiajob.db import SearchSession, session_scope
+from getiajob.db import SearchSession, UserProfile, session_scope
+from getiajob.services.cancellation import SearchCancelled, check_cancelled, search_context
 from getiajob.services.cvs import owns_cv
 from getiajob.services.feedback import FeedbackSignals, feedback_signals
+from getiajob.services.seen import seen_ids
 from getiajob.services.users import ProfileData
 
 log = logging.getLogger(__name__)
@@ -26,7 +28,9 @@ STATUS_LABELS = {
     "running": "En cours",
     "done": "Terminée",
     "failed": "Échec",
+    "cancelled": "Arrêtée",
 }
+STOPPED = "Arrêtée à ta demande."
 MAX_DAYS = 30
 
 
@@ -35,7 +39,8 @@ class SearchOptions:
     """Paramètres saisis dans le formulaire « Nouvelle recherche »."""
 
     max_age_days: int = 7  # fraîcheur des annonces
-    top_n: int = 10
+    top_n: int = 20
+    min_score: int = 60  # seuil du score de matching CV ↔ offre
     keywords: list[str] = field(default_factory=list)
     locations: list[str] = field(default_factory=list)
     remote: list[str] = field(default_factory=list)
@@ -50,6 +55,33 @@ class SearchOptions:
     sources: list[str] | None = None  # None = celles de la fiche
 
 
+# Valeurs du formulaire mémorisées en plus des SearchOptions. « Ne pas interroger les sites » et
+# « Ré-évaluer toutes les offres » n'en font pas partie : ce sont des actions ponctuelles.
+FORM_EXTRAS = ("cv_id", "use_feedback", "feedback_llm", "hide_seen")
+
+
+def load_search_form(user_id: int) -> dict:
+    """Dernières valeurs du formulaire « Nouvelle recherche » ({} si aucune)."""
+    with session_scope() as session:
+        row = session.get(UserProfile, user_id)
+        return dict(row.search_options or {}) if row else {}
+
+
+def save_search_form(user_id: int, opts: SearchOptions, **extras) -> None:
+    """Mémorise les valeurs du formulaire pour les proposer à la recherche suivante."""
+    values = asdict(opts) | {k: v for k, v in extras.items() if k in FORM_EXTRAS}
+    with session_scope() as session:
+        row = session.get(UserProfile, user_id) or UserProfile(user_id=user_id)
+        row.search_options = values
+        session.add(row)
+
+
+def reset_search_form(user_id: int) -> None:
+    with session_scope() as session:
+        if row := session.get(UserProfile, user_id):
+            row.search_options = None
+
+
 def clamp_days(days: int) -> int:
     """Fraîcheur des annonces bornée à ce que les sources acceptent (1 à 30 jours)."""
     return max(1, min(MAX_DAYS, int(days)))
@@ -60,10 +92,12 @@ def build_preferences(
     opts: SearchOptions,
     base: Preferences | None = None,
     feedback: FeedbackSignals | None = None,
+    seen_job_ids: list[int] | None = None,
 ) -> Preferences:
     """Fusionne config YAML (valeurs par défaut) < fiche utilisateur < options de la recherche.
 
     `feedback` : avis de l'utilisateur sur des offres précédentes, figés dans la recherche.
+    `seen_job_ids` : offres déjà consultées, exclues de la recherche.
     """
     feedback = feedback or FeedbackSignals()
     base = base or load_preferences()
@@ -92,10 +126,12 @@ def build_preferences(
     ranking = RankingPreferences(
         prefilter_top_k=max(opts.prefilter_top_k, opts.top_n),
         top_n=opts.top_n,
+        min_score=opts.min_score,
         llm_weight=opts.llm_weight,
         hidden_job_ids=feedback.hidden_job_ids,
         liked_job_ids=feedback.liked_job_ids,
         disliked_job_ids=feedback.disliked_job_ids,
+        seen_job_ids=seen_job_ids or [],
     )
     return Preferences(search=search, expectations=expectations, ranking=ranking)
 
@@ -109,6 +145,7 @@ def create_search(
     skip_scrape: bool = False,
     force_rank: bool = False,
     feedback_llm: bool = True,
+    hide_seen: bool = False,
 ) -> int:
     if not owns_cv(user_id, cv_id):
         raise PermissionError("Ce CV n'appartient pas à l'utilisateur.")
@@ -122,6 +159,7 @@ def create_search(
                 "skip_scrape": skip_scrape,
                 "force_rank": force_rank,
                 "feedback_llm": feedback_llm,  # résumé des avis transmis au LLM ?
+                "hide_seen": hide_seen,  # offres déjà consultées exclues ?
             },
             status="pending",
         )
@@ -145,14 +183,22 @@ def rerank_search(user_id: int, search_id: int) -> int | None:
         prefs = Preferences.model_validate(source.params["preferences"])
         name, cv_id = source.name, source.cv_id
         feedback_llm = source.params.get("feedback_llm", True)
+        hide_seen = source.params.get("hide_seen", False)
     fb = feedback_signals(user_id, with_digest=feedback_llm)
     prefs.expectations.feedback = fb.digest
     prefs.ranking.hidden_job_ids = fb.hidden_job_ids
     prefs.ranking.liked_job_ids = fb.liked_job_ids
     prefs.ranking.disliked_job_ids = fb.disliked_job_ids
+    prefs.ranking.seen_job_ids = seen_ids(user_id) if hide_seen else []
     base_name = name.split(" · réajustée")[0]
     return create_search(
-        user_id, cv_id, f"{base_name} · réajustée", prefs, skip_scrape=True, feedback_llm=feedback_llm
+        user_id,
+        cv_id,
+        f"{base_name} · réajustée",
+        prefs,
+        skip_scrape=True,
+        feedback_llm=feedback_llm,
+        hide_seen=hide_seen,
     )
 
 
@@ -196,10 +242,12 @@ def run_search(search_id: int) -> None:
             "force_rank": bool(params.get("force_rank")),
         }
         final: dict = {}
-        for chunk in build_graph().stream(state, stream_mode="updates"):
-            for node, node_update in chunk.items():
-                final.update(node_update or {})
-                _update(search_id, step=_next_step(node, skip))
+        with search_context(search_id):
+            for chunk in build_graph().stream(state, stream_mode="updates"):
+                for node, node_update in chunk.items():
+                    final.update(node_update or {})
+                    _update(search_id, step=_next_step(node, skip))
+                check_cancelled(min_interval=0)
 
         _update(
             search_id,
@@ -209,6 +257,8 @@ def run_search(search_id: int) -> None:
             n_offers=len(final["job_ids"]) if "job_ids" in final else None,
             finished_at=datetime.now(UTC),
         )
+    except SearchCancelled:
+        log.info("Recherche %s arrêtée : traitement interrompu.", search_id)
     except Exception as exc:
         log.exception("Échec de la recherche %s", search_id)
         _update(search_id, status="failed", step=None, error=str(exc)[:2000], finished_at=datetime.now(UTC))
@@ -231,6 +281,48 @@ def get_search(user_id: int, search_id: int) -> SearchSession | None:
         return session.scalar(
             select(SearchSession).where(SearchSession.id == search_id, SearchSession.user_id == user_id)
         )
+
+
+def stop_search(user_id: int, search_id: int) -> bool:
+    """Arrête une recherche en attente ou en cours de l'utilisateur.
+
+    Une recherche en attente ne sera pas lancée ; une recherche en cours s'interrompt à la prochaine
+    vérification (offre collectée ou évaluée), ce qui libère la file pour les recherches suivantes.
+    """
+    with session_scope() as session:
+        result = session.execute(
+            update(SearchSession)
+            .where(
+                SearchSession.id == search_id,
+                SearchSession.user_id == user_id,
+                SearchSession.status.in_(("pending", "running")),
+            )
+            .values(status="cancelled", step=None, error=STOPPED, finished_at=datetime.now(UTC))
+        )
+        return bool(result.rowcount)
+
+
+def relaunch_search(user_id: int, search_id: int) -> bool:
+    """Remet en file une recherche arrêtée (mêmes paramètres). Le lancement est fait par l'appelant."""
+    with session_scope() as session:
+        result = session.execute(
+            update(SearchSession)
+            .where(
+                SearchSession.id == search_id,
+                SearchSession.user_id == user_id,
+                SearchSession.status == "cancelled",
+            )
+            .values(
+                status="pending",
+                step=None,
+                error=None,
+                results=None,
+                n_offers=None,
+                started_at=None,
+                finished_at=None,
+            )
+        )
+        return bool(result.rowcount)
 
 
 def delete_search(user_id: int, search_id: int) -> None:

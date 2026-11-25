@@ -24,6 +24,8 @@ from getiajob.scraping.base import (
 )
 from getiajob.scraping.francetravail import FranceTravailSource
 from getiajob.scraping.linkedin import LinkedInSource
+from getiajob.seniority import level_prompt, max_years
+from getiajob.services.cancellation import SearchCancelled, check_cancelled
 from getiajob.services.monitoring import record, timed
 
 log = logging.getLogger(__name__)
@@ -34,13 +36,17 @@ PLANNER_PROMPT = """Tu es chasseur de têtes. À partir du profil d'un candidat 
 propose des requêtes de recherche d'emploi courtes (2 à 4 mots, pas d'opérateurs booléens),
 utilisables sur LinkedIn, France Travail et Adzuna, dans la langue du marché visé,
 de la plus pertinente à la moins pertinente.
-Varie les intitulés (synonymes, variantes anglaises courantes) sans t'éloigner du profil."""
+Varie les intitulés (synonymes, variantes anglaises courantes) sans t'éloigner du profil.
+Si un niveau débutant ou junior est visé, n'utilise aucun intitulé senior (senior, lead, expert,
+confirmé…) et ajoute au moins une requête précisant le niveau (ex. « ingénieur IA junior »)."""
 
 
 def plan_queries(profile: CVProfile, prefs: Preferences) -> list[str]:
     if prefs.search.keywords:
         return prefs.search.keywords
 
+    levels = prefs.search.experience_levels
+    level = f"Niveau visé : {level_prompt(levels)}\n" if levels and max_years(levels) is not None else ""
     llm = structured(SearchPlan)
     with timed("llm", "plan_requetes"):
         plan: SearchPlan = llm.invoke(
@@ -48,7 +54,8 @@ def plan_queries(profile: CVProfile, prefs: Preferences) -> list[str]:
                 ("system", PLANNER_PROMPT),
                 (
                     "human",
-                    f"Profil :\n{profile.to_text()}\n\nAttentes :\n{prefs.expectations.to_prompt()}\n\n"
+                    f"Profil :\n{profile.to_text()}\n\n"
+                    f"Attentes :\n{level}{prefs.expectations.to_prompt()}\n\n"
                     f"Donne au plus {prefs.search.max_queries} requêtes.",
                 ),
             ]
@@ -175,16 +182,16 @@ def store_posting(
 
 
 def _alert_offers(user_id: int | None, days: int) -> set[int]:
-    """Relève la boîte des alertes e-mail puis renvoie les offres APEC de l'utilisateur."""
+    """Relève la boîte des alertes e-mail puis renvoie les offres reçues par l'utilisateur."""
     from getiajob.services.mail_alerts import sync_mailbox, user_alert_job_ids
 
     if user_id is None:
         return set()
     report = sync_mailbox()
     if report.error:
-        log.warning("APEC : %s", report.error)
+        log.warning("Alertes e-mail : %s", report.error)
     ids = set(user_alert_job_ids(user_id, days))
-    log.info("APEC (alertes e-mail) : %d offre(s) sur la période.", len(ids))
+    log.info("Alertes e-mail : %d offre(s) sur la période.", len(ids))
     return ids
 
 
@@ -214,6 +221,7 @@ def scrape_jobs(profile: CVProfile, prefs: Preferences, user_id: int | None = No
                             remote=prefs.search.remote,
                             experience_levels=prefs.search.experience_levels,
                         ):
+                            check_cancelled()
                             job = store_posting(session, source, posting, query)
                             session.flush()
                             found.add(job.id)
@@ -226,6 +234,9 @@ def scrape_jobs(profile: CVProfile, prefs: Preferences, user_id: int | None = No
                             duration_ms=int((time.monotonic() - started) * 1000),
                         )
                         log.info("%s — « %s » @ %s : %d offres", label, query, location, len(found))
+            except SearchCancelled:
+                session.commit()  # les offres déjà collectées restent en base
+                raise
             except Exception as exc:  # une source en panne n'empêche pas les autres
                 session.rollback()
                 log.warning("%s indisponible, source ignorée : %s", label, exc)
