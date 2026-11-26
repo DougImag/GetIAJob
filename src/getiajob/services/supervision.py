@@ -647,7 +647,8 @@ def check_ollama() -> Check:
         return Check("Ollama", False, f"Injoignable ({type(exc).__name__})")
     # Avec un LLM distant (LLM_PROVIDER=openai), Ollama ne sert plus qu'aux embeddings
     llm = llm_settings.current()
-    needed = (llm.model, s.embedding_model) if llm.provider == "ollama" else (s.embedding_model,)
+    on_this_server = llm.provider == "ollama" and llm.base_url == s.ollama_base_url.rstrip("/")
+    needed = (llm.model, s.embedding_model) if on_this_server else (s.embedding_model,)
     missing = [m for m in needed if m not in tags and f"{m}:latest" not in tags]
     detail = f"{len(tags)} modèle(s) installé(s) · en mémoire : {', '.join(loaded) or 'aucun'}"
     if missing:
