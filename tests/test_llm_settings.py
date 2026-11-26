@@ -18,6 +18,8 @@ def _settings(monkeypatch, **extra) -> Settings:
 
 
 def test_profiles_from_nested_env(monkeypatch):
+    for field in ("LABEL", "PROVIDER", "BASE_URL", "REASONING_EFFORT", "PRICE_OUTPUT"):
+        monkeypatch.delenv(f"LLM_PROFILES__OLALA__{field}", raising=False)
     monkeypatch.setenv("LLM_PROFILES__OLALA__MODEL", "Olala-v1.0-mini-7A1B")
     monkeypatch.setenv("LLM_PROFILES__OLALA__API_KEY", "secret")
     monkeypatch.setenv("LLM_PROFILES__OLALA__PRICE_INPUT", "0")

@@ -10,7 +10,7 @@ from html import escape
 
 import streamlit as st
 
-from getiajob.agents.cv_analyzer import SUPPORTED_EXTENSIONS, save_cv
+from getiajob.agents.cv_analyzer import STEPS, SUPPORTED_EXTENSIONS, save_cv
 from getiajob.cv_pdf import file_name as cv_pdf_name
 from getiajob.cv_pdf import render_cv_pdf
 from getiajob.cv_text import detected_sections
@@ -26,13 +26,43 @@ from getiajob.services.cvs import (
     list_cvs,
 )
 from getiajob.services.users import SessionUser
-from getiajob.web.state import get_runner
+from getiajob.web.state import get_runner, is_read_only
 from getiajob.web.views import cv_edit
 from getiajob.web.views.admin_format import budget_status, estimate_label, estimate_note
 from getiajob.web.views.cv_edit import SENIORITY
 from getiajob.web.views.results import icon
 
 UPLOADER_KEY = "cv_uploader_n"
+
+
+def _delete(user_id: int, cv_id: int) -> None:
+    """Callback du bouton « Confirmer » : supprime le CV et referme le menu de confirmation."""
+    delete_cv(user_id, cv_id)
+    st.session_state[f"del-menu-{cv_id}"] = False
+
+
+def _failed_sections(cv_id: int, p: CVProfile) -> None:
+    """Sections que le LLM n'a pas pu extraire, tant qu'elles n'ont pas été complétées à la main."""
+    still_empty = {
+        "identity": not (p.full_name or p.headline),
+        "experiences": not p.experiences,
+        "education": not p.education,
+        "projects": not p.projects,
+        "skills": not p.skills,
+        "synthesis": not p.target_job_titles,
+    }
+    missing = [STEPS[k][0] for k in p.failed_sections if k in STEPS and still_empty.get(k, False)]
+    if not missing:
+        return
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.warning(
+            f"L'IA n'a pas pu extraire : **{', '.join(missing)}**. Relance l'analyse ou complète la "
+            "section à la main.",
+            icon=":material/warning:",
+        )
+        # Profil corrigé à la main : la ré-analyse passe par le bouton dédié (avec confirmation)
+        if not p.edited_at and st.button("Ré-analyser", key=f"failed-re-{cv_id}", icon=":material/refresh:"):
+            _analyze(cv_id)
 
 
 def _analyze(cv_id: int, force: bool = True) -> None:
@@ -620,11 +650,19 @@ def _cv_card(user_id: int, cv: CVSummary, is_current: bool) -> None:
                 disabled=cv.analyzing,
             ):
                 _analyze(cv.id)
-            with st.popover("", icon=":material/delete:", help="Supprimer"):
+            # Clé propre au CV : le menu se referme à la suppression et ne se rouvre pas sur le CV suivant
+            with st.popover(
+                "", icon=":material/delete:", help="Supprimer", key=f"del-menu-{cv.id}", on_change="rerun"
+            ):
                 st.write("Supprimer ce CV et ses scores ?")
-                if st.button("Confirmer", type="primary", key=f"del-{cv.id}"):
-                    delete_cv(user_id, cv.id)
-                    st.rerun()
+                st.button(
+                    "Confirmer",
+                    type="primary",
+                    key=f"del-{cv.id}",
+                    on_click=_delete,
+                    args=(user_id, cv.id),
+                    disabled=is_read_only(),
+                )
 
         p = cv.profile
         if cv.analyzing:
@@ -660,6 +698,7 @@ def _cv_card(user_id: int, cv: CVSummary, is_current: bool) -> None:
                 return
 
         st.html(CV_CSS)  # styles seuls : n'occupe aucune place
+        _failed_sections(cv.id, p)
         n_skills = sum(len(items) for _, items in _merged_skills(p)) + len(p.soft_skills)
         if _edit_toggle(f"edit-id-{cv.id}", "Modifier l'identité"):
             cv_edit.edit_identity(user_id, cv.id, p)

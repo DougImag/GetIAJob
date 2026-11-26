@@ -123,6 +123,8 @@ class CVProfile(BaseModel):
     interests: list[str] = Field(default_factory=list)
     # Date de la dernière correction manuelle (None = profil tel qu'extrait par l'IA)
     edited_at: str | None = None
+    # Étapes de l'analyse que le LLM n'a pas réussies (« experiences », « synthesis »…) : signalées à l'écran
+    failed_sections: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -218,6 +220,20 @@ class IdentityExtraction(BaseModel):
 
 class ExperienceExtraction(BaseModel):
     experiences: list[Experience] = Field(default_factory=list)
+
+
+class ExperienceOutline(BaseModel):
+    """Repère d'une expérience (1re passe de l'extraction en deux temps) : réponse courte."""
+
+    title: str = Field(description="Intitulé du poste")
+    company: str | None = Field(default=None, description="Entreprise / organisation")
+    start: str | None = Field(default=None, description="Début tel qu'écrit")
+    end: str | None = Field(default=None, description="Fin telle qu'écrite")
+    duration: str | None = Field(default=None, description="Durée si indiquée")
+
+
+class ExperienceOutlineList(BaseModel):
+    experiences: list[ExperienceOutline] = Field(default_factory=list)
 
 
 class EducationExtraction(BaseModel):

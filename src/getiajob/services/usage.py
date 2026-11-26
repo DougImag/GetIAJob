@@ -90,13 +90,29 @@ def month_tokens(user_id: int) -> int:
 
 def record_message(message: Any, input_chars: int | None = None) -> None:
     """Enregistre les tokens d'une réponse du LLM (sans effet si le fournisseur ne les donne pas)."""
-    counts = tokens(message)
-    if counts is None:
+    if (counts := tokens(message)) is not None:
+        _record(*counts, input_chars)
+
+
+def record_failure(exc: BaseException, input_chars: int | None = None) -> None:
+    """Enregistre les tokens d'un appel refusé après génération (réponse coupée par la limite de
+    longueur : `LengthFinishReasonError` d'OpenAI) : ils ont été consommés, donc facturés."""
+    usage = getattr(getattr(exc, "completion", None), "usage", None)
+    if usage is None:
         return
+    details = getattr(usage, "completion_tokens_details", None)
+    _record(
+        int(usage.prompt_tokens or 0),
+        int(usage.completion_tokens or 0),
+        int(getattr(details, "reasoning_tokens", None) or 0),
+        input_chars,
+    )
+
+
+def _record(n_in: int, n_out: int, n_reasoning: int, input_chars: int | None) -> None:
     from getiajob.services.llm_settings import current
 
     profile = current()
-    n_in, n_out, n_reasoning = counts
     try:
         with session_scope() as session:
             session.add(

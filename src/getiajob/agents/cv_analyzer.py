@@ -4,6 +4,11 @@
 2. Une extraction LLM ciblée par section (identité, expériences, formation, projets, compétences),
    en parallèle : de petits schémas sont bien mieux remplis par un modèle 7B qu'un schéma géant.
 3. Une synthèse (séniorité, postes cibles, secteurs) à partir des sections structurées.
+
+Les expériences d'un CV long sont la plus grosse réponse demandée : un petit modèle peut ne jamais
+la terminer (raisonnement sans fin, JSON tronqué ou mal rempli). Dans ce cas elles sont extraites
+en deux temps : la liste des postes (réponse courte), puis le détail de chaque poste à partir de
+son seul extrait du CV.
 """
 
 from __future__ import annotations
@@ -21,13 +26,15 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 
 from getiajob.config import get_settings
-from getiajob.cv_text import extract_cv_text
+from getiajob.cv_text import extract_cv_text, section_text
 from getiajob.db import CVRecord, JobMatch, session_scope
 from getiajob.llm import get_embeddings, structured
 from getiajob.schemas import (
     CVProfile,
     EducationExtraction,
+    Experience,
     ExperienceExtraction,
+    ExperienceOutlineList,
     IdentityExtraction,
     ProfileSynthesis,
     ProjectExtraction,
@@ -88,6 +95,23 @@ TASKS: dict[str, tuple[type[BaseModel], str]] = {
     ),
 }
 
+EXPERIENCE_OUTLINE = (
+    "Liste TOUTES les expériences professionnelles (emplois, stages, alternances, missions, freelance), "
+    "sans les formations ni les projets. Pour chacune, seulement : l'intitulé du poste, l'entreprise, "
+    "les dates de début/fin et la durée telles qu'écrites. Un champ = une information : ne mets jamais "
+    "la description, l'entreprise ou les technologies dans l'intitulé. De la plus récente à la plus "
+    "ancienne."
+)
+EXPERIENCE_DETAIL = (
+    "Extrais UNIQUEMENT l'expérience « {label} », décrite dans l'extrait de CV ci-dessous (ignore les "
+    "autres) : intitulé du poste, entreprise, lieu, dates de début/fin et durée telles qu'écrites, type "
+    "de contrat (stage, CDI, freelance…) si indiqué, la mission en une phrase, chaque réalisation (une "
+    "par puce) et les technologies citées. Un champ = une information : l'intitulé ne contient que le "
+    "nom du poste."
+)
+# Au-delà, l'« intitulé » contient en fait toute l'expérience : réponse mal remplie par le modèle
+MAX_TITLE_CHARS = 150
+
 SYNTHESIS_PROMPT = """Tu es un expert en recrutement. À partir du profil structuré d'un candidat :
 - headline : son titre professionnel en quelques mots (garde celui du CV s'il existe) ;
 - summary : résumé du profil en 2 phrases ;
@@ -139,10 +163,110 @@ def _run_task(name: str, text: str, progress: Progress = _noop) -> BaseModel | E
             )
     except Exception as exc:  # une section ratée ne doit pas faire échouer toute l'analyse
         log.warning("Extraction « %s » impossible : %s", name, exc)
+        result = exc
+    if name == "experiences" and _needs_two_passes(result, text):
+        log.info("Expériences non extraites en un appel : extraction en deux temps.")
+        try:
+            fallback = _experiences_in_two_passes(text)
+        except Exception as exc:
+            log.warning("Extraction des expériences en deux temps impossible : %s", exc)
+        else:
+            if fallback.experiences or isinstance(result, Exception):
+                result = fallback
+    if isinstance(result, Exception):
         progress(name, "failed")
-        return exc
+        return result
     progress(name, "done")
     return result
+
+
+def _plausible(experience: Experience) -> bool:
+    return bool(experience.title.strip()) and len(experience.title) <= MAX_TITLE_CHARS
+
+
+def _needs_two_passes(result: BaseModel | Exception, text: str) -> bool:
+    """Extraction en un appel ratée, vide ou mal remplie, alors que le CV a une section d'expériences."""
+    if isinstance(result, ExperienceExtraction) and result.experiences:
+        if all(_plausible(e) for e in result.experiences):
+            return False
+    elif not isinstance(result, Exception) and not section_text(text, "experience"):
+        return False  # aucune expérience trouvée, et le CV n'en annonce pas (étudiant…)
+    return True
+
+
+def _header_line(line: str) -> bool:
+    line = line.strip()
+    return bool(line) and not line.startswith(("•", "-", "*", "–", "## "))
+
+
+def _experience_chunks(section: str, titles: list[str]) -> list[str]:
+    """Extrait du CV propre à chaque poste : de son intitulé à celui du poste suivant.
+
+    Les intitulés sont cherchés dans l'ordre ; un intitulé introuvable reçoit toute la section.
+    Jusqu'à deux lignes au-dessus de l'intitulé sont incluses (entreprise ou dates placées avant),
+    sans remonter au-delà d'une ligne vide ou d'une puce (fin du poste précédent).
+    """
+    lines = section.split("\n")
+    normalized = [_norm(line) for line in lines]
+    positions: list[int | None] = []
+    cursor = 0
+    for title in titles:
+        needle = _norm(title)[:40]
+        found = next((i for i in range(cursor, len(lines)) if needle and needle in normalized[i]), None)
+        positions.append(found)
+        if found is not None:
+            cursor = found + 1
+    chunks = []
+    for i, start in enumerate(positions):
+        if start is None:
+            chunks.append(section)
+            continue
+        end = next((p for p in positions[i + 1 :] if p is not None), len(lines))
+        top = start
+        while top > max(0, start - 2) and _header_line(lines[top - 1]):
+            top -= 1
+        chunks.append("\n".join(lines[top:end]).strip())
+    return chunks
+
+
+def _experience_detail(outline, chunk: str) -> Experience:
+    """Détail d'un poste ; à défaut, le poste tel que repéré (intitulé, entreprise, dates)."""
+    label = " · ".join(x for x in (outline.title, outline.company, outline.start, outline.duration) if x)
+    known = {k: getattr(outline, k) for k in ("company", "start", "end", "duration")}
+    try:
+        with timed("llm", "cv_exp_detail"):
+            detail = structured(Experience).invoke(
+                [
+                    ("system", f"{COMMON_RULES}\n\n{EXPERIENCE_DETAIL.format(label=label)}"),
+                    ("human", f"Extrait du CV :\n\n{chunk}"),
+                ]
+            )
+    except Exception as exc:
+        log.warning("Détail de l'expérience « %s » impossible : %s", label, exc)
+        detail = None
+    if detail is None or not _plausible(detail):
+        return Experience(title=outline.title, **known)
+    return detail.model_copy(update={k: v for k, v in known.items() if v and not getattr(detail, k)})
+
+
+def _experiences_in_two_passes(text: str) -> ExperienceExtraction:
+    """1re passe : liste courte des postes ; 2e passe : détail de chaque poste, en parallèle."""
+    section = section_text(text, "experience") or text
+    with timed("llm", "cv_exp_liste"):
+        outline: ExperienceOutlineList = structured(ExperienceOutlineList).invoke(
+            [("system", f"{COMMON_RULES}\n\n{EXPERIENCE_OUTLINE}"), ("human", f"Texte du CV :\n\n{section}")]
+        )
+    items = [o for o in outline.experiences if o.title.strip() and len(o.title) <= MAX_TITLE_CHARS]
+    if not items:
+        return ExperienceExtraction()
+    chunks = _experience_chunks(section, [o.title for o in items])
+    workers = max(1, get_settings().llm_concurrency)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(contextvars.copy_context().run, _experience_detail, o, chunk)
+            for o, chunk in zip(items, chunks, strict=True)
+        ]
+        return ExperienceExtraction(experiences=[f.result() for f in futures])
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -254,6 +378,38 @@ def _clean(data, text_norm: str, key: str | None = None):
     return data
 
 
+DURATION_RE = re.compile(r"^\d+(?:[.,]\d+)?\s*(?:ans?|années?|mois|years?|months?)$", re.IGNORECASE)
+
+
+def _fix_duration(experience: Experience) -> Experience:
+    """« 11 ans » rangé en date de début : c'est une durée."""
+    start = (experience.start or "").strip()
+    if DURATION_RE.match(start) and not experience.duration:
+        return experience.model_copy(update={"start": None, "duration": start})
+    return experience
+
+
+def _dedupe_experiences(experiences: list[Experience]) -> list[Experience]:
+    """Retire les postes répétés par le modèle (même intitulé, ou l'un préfixe de l'autre, chez la même
+    entreprise) ; la première occurrence, la plus détaillée en général, est gardée."""
+
+    def company_key(e: Experience) -> str:
+        words = _norm(e.company or "").split()
+        return words[0] if words else ""
+
+    kept: list[Experience] = []
+    for exp in experiences:
+        title = _norm(exp.title)
+        duplicate = any(
+            company_key(k) == company_key(exp)
+            and (title.startswith(_norm(k.title)) or _norm(k.title).startswith(title))
+            for k in kept
+        )
+        if not duplicate:
+            kept.append(exp)
+    return kept
+
+
 def _contact_fallback(profile: CVProfile, text: str) -> None:
     """Coordonnées repérées par expressions régulières : complète ou corrige le LLM."""
     c = profile.contact
@@ -285,6 +441,7 @@ def extract_profile(text: str, progress: Progress = _noop) -> CVProfile:
         cause = f"{type(errors[0]).__name__} : {errors[0]}"[:300]
         raise RuntimeError(f"Le LLM n'a pu extraire aucune section du CV ({cause}).")
     parts = {name: None if isinstance(r, Exception) else r for name, r in results.items()}
+    failed = [name for name, r in results.items() if isinstance(r, Exception)]
 
     identity = parts["identity"] or IdentityExtraction()
     experiences = parts["experiences"] or ExperienceExtraction()
@@ -297,7 +454,7 @@ def extract_profile(text: str, progress: Progress = _noop) -> CVProfile:
         headline=identity.headline.strip(),
         summary=identity.summary.strip(),
         contact=identity.contact,
-        experiences=[e for e in experiences.experiences if e.title.strip()],
+        experiences=_dedupe_experiences([_fix_duration(e) for e in experiences.experiences if _plausible(e)]),
         education=[e for e in education.education if e.degree.strip()],
         certifications=_dedupe(education.certifications),
         projects=[p for p in projects.projects if p.name.strip()],
@@ -327,6 +484,7 @@ def extract_profile(text: str, progress: Progress = _noop) -> CVProfile:
     except Exception as exc:
         log.warning("Synthèse du profil impossible : %s", exc)
         progress("synthesis", "failed")
+        failed.append("synthesis")
     else:
         progress("synthesis", "done")
         profile.headline = profile.headline or synthesis.headline.strip()
@@ -335,6 +493,7 @@ def extract_profile(text: str, progress: Progress = _noop) -> CVProfile:
         profile.years_of_experience = synthesis.years_of_experience
         profile.target_job_titles = _dedupe(synthesis.target_job_titles)[:6]
         profile.industries = _dedupe(synthesis.industries)
+    profile.failed_sections = failed
     return profile
 
 

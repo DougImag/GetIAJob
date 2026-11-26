@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from getiajob.config import LLMProfile, get_settings
 from getiajob.services import llm_settings
-from getiajob.services.usage import record_message
+from getiajob.services.usage import record_failure, record_message
 
 M = TypeVar("M", bound=BaseModel)
 
@@ -156,7 +156,11 @@ def _counted(model: Runnable) -> RunnableLambda:
 
     def call(value: Any) -> BaseMessage:
         llm_settings.check_budget()  # limite de tokens atteinte : appel refusé (TokenBudgetExceeded)
-        message = model.invoke(value)
+        try:
+            message = model.invoke(value)
+        except Exception as exc:  # réponse coupée par la limite de longueur : tokens quand même facturés
+            record_failure(exc, input_chars(value))
+            raise
         # Avant la lecture du JSON : une réponse illisible a quand même été facturée
         record_message(message, input_chars(value))
         return message
