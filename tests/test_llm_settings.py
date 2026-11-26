@@ -18,8 +18,6 @@ def _settings(monkeypatch, **extra) -> Settings:
 
 
 def test_profiles_from_nested_env(monkeypatch):
-    for field in ("LABEL", "PROVIDER", "BASE_URL", "REASONING_EFFORT", "PRICE_OUTPUT"):
-        monkeypatch.delenv(f"LLM_PROFILES__OLALA__{field}", raising=False)
     monkeypatch.setenv("LLM_PROFILES__OLALA__MODEL", "Olala-v1.0-mini-7A1B")
     monkeypatch.setenv("LLM_PROFILES__OLALA__API_KEY", "secret")
     monkeypatch.setenv("LLM_PROFILES__OLALA__PRICE_INPUT", "0")
@@ -145,3 +143,67 @@ def test_budget_status_keeps_tightest_limit(monkeypatch):
     assert level == "ok" and "limite globale" in msg
     monkeypatch.setattr(llm_settings, "user_budget", lambda uid: llm_settings.UserBudget(500_000, 600_000))
     assert admin_format.budget_status(1, user_id=3)[1] == "block"
+
+
+def test_default_profile_can_be_declared_as_a_block(monkeypatch):
+    monkeypatch.setenv("LLM_PROFILES__DEFAULT__LABEL", "Qwen local")
+    monkeypatch.setenv("LLM_PROFILES__DEFAULT__PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_PROFILES__DEFAULT__MODEL", "qwen2.5:7b")
+    monkeypatch.setenv("LLM_PROFILES__GEMMA4__PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_PROFILES__GEMMA4__MODEL", "gemma4:12b")
+    # Le bloc DEFAULT remplace les variables LLM_*
+    profiles = llm_profiles(Settings(llm_provider="openai", llm_model="ignoré"))
+    assert list(profiles)[0] == "default"
+    default = profiles["default"]
+    assert (default.name, default.title, default.provider, default.model) == (
+        "default",
+        "Qwen local",
+        "ollama",
+        "qwen2.5:7b",
+    )
+    assert profiles["gemma4"].model == "gemma4:12b"
+
+
+def test_default_block_carries_shared_settings(monkeypatch):
+    for field, value in {
+        "PROVIDER": "ollama",
+        "MODEL": "qwen2.5:7b",
+        "BASE_URL": "http://host.docker.internal:11434/",
+        "NUM_CTX": "16384",
+        "EMBEDDING_MODEL": "bge-m3",
+        "EMBEDDING_DIM": "1024",
+    }.items():
+        monkeypatch.setenv(f"LLM_PROFILES__DEFAULT__{field}", value)
+    monkeypatch.setenv("LLM_PROFILES__GEMMA4__PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_PROFILES__GEMMA4__MODEL", "gemma4:12b")
+    monkeypatch.setenv("LLM_PROFILES__OLALA__MODEL", "Olala-v1.0-mini-7A1B")
+    monkeypatch.setenv("LLM_PROFILES__OLALA__NUM_CTX", "4096")
+    monkeypatch.setenv("LLM_PROFILES__OLALA__EMBEDDING_MODEL", "ignoré hors du bloc DEFAULT")
+    s = Settings(ollama_base_url="http://ollama:11434", llm_num_ctx=8192)
+    # Réglages communs : ceux du bloc DEFAULT priment sur OLLAMA_BASE_URL, LLM_NUM_CTX, EMBEDDING_*
+    assert (s.ollama_base_url, s.llm_num_ctx, s.embedding_model, s.embedding_dim) == (
+        "http://host.docker.internal:11434/",
+        16384,
+        "bge-m3",
+        1024,
+    )
+    profiles = llm_profiles(s)
+    assert (profiles["default"].base_url, profiles["default"].num_ctx) == (
+        "http://host.docker.internal:11434",
+        16384,
+    )
+    # Autre modèle Ollama : adresse et contexte communs par défaut
+    assert (profiles["gemma4"].base_url, profiles["gemma4"].num_ctx) == (
+        "http://host.docker.internal:11434",
+        16384,
+    )
+    # API distante : adresse OVH par défaut, contexte propre
+    assert "oai.endpoints" in profiles["olala"].base_url and profiles["olala"].num_ctx == 4096
+
+
+def test_without_default_block_llm_variables_still_apply():
+    s = Settings(
+        llm_provider="ollama", llm_model="qwen2.5:3b", ollama_base_url="http://ollama:11434", llm_num_ctx=4096
+    )
+    default = llm_profiles(s)["default"]
+    assert (default.model, default.base_url, default.num_ctx) == ("qwen2.5:3b", "http://ollama:11434", 4096)

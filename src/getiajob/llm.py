@@ -39,7 +39,7 @@ def uses_ollama_llm() -> bool:
 def llm_endpoint() -> str:
     """Adresse du LLM actif, pour l'affichage et les diagnostics."""
     profile = llm_settings.current()
-    return get_settings().ollama_base_url if profile.provider == "ollama" else profile.base_url
+    return profile.base_url
 
 
 def _drop_empty_auth(request: httpx.Request) -> None:
@@ -82,10 +82,10 @@ def _chat_model(profile: LLMProfile) -> BaseChatModel:
         )
     return ChatOllama(
         model=profile.model,
-        base_url=s.ollama_base_url,
+        base_url=profile.base_url,
         temperature=s.llm_temperature,
         # Le contexte par défaut d'Ollama est trop court pour un CV + une offre complète.
-        num_ctx=s.llm_num_ctx,
+        num_ctx=profile.num_ctx or s.llm_num_ctx,
         # Plafond de la réponse : borne la durée d'un appel qui partirait en boucle.
         num_predict=s.llm_max_tokens,
         # Sans délai, un appel bloqué (mémoire saturée…) ferait attendre l'analyse indéfiniment.

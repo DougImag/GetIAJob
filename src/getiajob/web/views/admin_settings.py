@@ -14,8 +14,24 @@ from getiajob.web.views.admin_format import local, money_label, tokens_label
 
 TEST_KEY = "settings_llm_test"
 
-ENV_EXAMPLE = """# Configuration « default » : les variables LLM_* (LLM_PROVIDER, LLM_MODEL, LLM_API_KEY…)
-# Autres configurations : LLM_PROFILES__<NOM>__<CHAMP>, puis scripts/restart.sh
+ENV_EXAMPLE = """# Une configuration par bloc LLM_PROFILES__<NOM>__<CHAMP>, puis scripts/restart.sh
+# « DEFAULT » : utilisée tant qu'aucune autre n'est choisie (à défaut : les variables LLM_*), et
+# réglages communs : adresse d'Ollama, contexte par défaut, embeddings (communs à toutes)
+LLM_PROFILES__DEFAULT__LABEL=Qwen 2.5 7B (Ollama, local)
+LLM_PROFILES__DEFAULT__PROVIDER=ollama
+LLM_PROFILES__DEFAULT__MODEL=qwen2.5:7b
+LLM_PROFILES__DEFAULT__BASE_URL=http://host.docker.internal:11434
+LLM_PROFILES__DEFAULT__NUM_CTX=8192
+LLM_PROFILES__DEFAULT__EMBEDDING_MODEL=nomic-embed-text
+LLM_PROFILES__DEFAULT__EMBEDDING_DIM=768
+LLM_PROFILES__DEFAULT__PRICE_INPUT=0
+LLM_PROFILES__DEFAULT__PRICE_OUTPUT=0
+
+# Autre modèle Ollama : BASE_URL et NUM_CTX facultatifs (ceux de DEFAULT)
+LLM_PROFILES__GEMMA4__LABEL=Gemma 4 12B (Ollama, local)
+LLM_PROFILES__GEMMA4__PROVIDER=ollama
+LLM_PROFILES__GEMMA4__MODEL=gemma4:12b
+
 LLM_PROFILES__OLALA__LABEL=Olala (OVHcloud, gratuit)
 LLM_PROFILES__OLALA__PROVIDER=openai
 LLM_PROFILES__OLALA__MODEL=Olala-v1.0-mini-7A1B
@@ -23,11 +39,7 @@ LLM_PROFILES__OLALA__BASE_URL=https://oai.endpoints.kepler.ai.cloud.ovh.net/v1
 LLM_PROFILES__OLALA__API_KEY=<ta clé>
 LLM_PROFILES__OLALA__REASONING_EFFORT=low
 LLM_PROFILES__OLALA__PRICE_INPUT=0
-LLM_PROFILES__OLALA__PRICE_OUTPUT=0
-
-LLM_PROFILES__QWEN3B__LABEL=Ollama rapide
-LLM_PROFILES__QWEN3B__PROVIDER=ollama
-LLM_PROFILES__QWEN3B__MODEL=qwen2.5:3b"""
+LLM_PROFILES__OLALA__PRICE_OUTPUT=0"""
 
 
 def render() -> None:
@@ -44,7 +56,7 @@ def render() -> None:
 
 def _describe(p: LLMProfile) -> str:
     if p.provider == "ollama":
-        parts = [f"Ollama local · `{p.model}`"]
+        parts = [f"Ollama · `{p.model}` · {p.base_url} · contexte {p.num_ctx}"]
     else:
         parts = [f"API compatible OpenAI · `{p.model}` · {p.base_url}"]
         parts.append("clé API ✓" if p.api_key else ":orange[sans clé API]")
@@ -57,14 +69,15 @@ def _describe(p: LLMProfile) -> str:
         prices = f"{p.price_input or 0:g} / {p.price_output or 0:g}".replace(".", ",")
         parts.append(f"{prices} {currency} par M tokens")
     if p.name == "default":
-        parts.append("variables `LLM_*`")
+        declared = "default" in {k.lower() for k in get_settings().llm_profiles}
+        parts.append("`LLM_PROFILES__DEFAULT__*`" if declared else "variables `LLM_*`")
     return " · ".join(parts)
 
 
 def _test(p: LLMProfile) -> Check:
     """Ollama : modèle installé ; API distante : modèle proposé, puis appel réel d'un token (clé, quota)."""
     if p.provider == "ollama":
-        base = get_settings().ollama_base_url
+        base = p.base_url
         try:
             tags = httpx.get(f"{base}/api/tags", timeout=5).raise_for_status().json().get("models", [])
         except Exception as exc:
@@ -125,7 +138,8 @@ def _llm(actor_id: int) -> None:
         st.markdown(
             "Les configurations se déclarent dans le `.env` (les clés API n'apparaissent donc jamais dans "
             "l'interface), puis `scripts/restart.sh`. Champs : `LABEL`, `PROVIDER` (`ollama` ou `openai`), "
-            "`MODEL`, `BASE_URL`, `API_KEY`, `JSON_MODE`, `REASONING_EFFORT`, `PRICE_INPUT`, `PRICE_OUTPUT`."
+            "`MODEL`, `BASE_URL`, `API_KEY`, `JSON_MODE`, `REASONING_EFFORT`, `NUM_CTX` (Ollama), "
+            "`PRICE_INPUT`, `PRICE_OUTPUT` ; bloc `DEFAULT` seulement : `EMBEDDING_MODEL`, `EMBEDDING_DIM`."
         )
         st.code(ENV_EXAMPLE, language="bash")
 

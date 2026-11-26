@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Provider = Literal["ollama", "openai"]
@@ -18,11 +18,15 @@ ReasoningEffort = Literal["", "none", "minimal", "low", "medium", "high", "xhigh
 DEFAULT_PROFILE = "default"
 
 
+OPENAI_DEFAULT_URL = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"  # OVHcloud AI Endpoints
+
+
 class LLMProfile(BaseModel):
     """Une configuration de LLM sélectionnable dans Admin › Paramètres.
 
-    La configuration « default » vient des variables LLM_* ; les autres sont déclarées dans le .env par
-    LLM_PROFILES__<NOM>__<CHAMP> (ex. LLM_PROFILES__OLALA__MODEL=Olala-v1.0-mini-7A1B).
+    Toutes se déclarent dans le .env par LLM_PROFILES__<NOM>__<CHAMP>
+    (ex. LLM_PROFILES__OLALA__MODEL=Olala-v1.0-mini-7A1B). La configuration « default » (utilisée tant
+    qu'aucune autre n'est choisie) est LLM_PROFILES__DEFAULT__* ; à défaut, les variables LLM_*.
     """
 
     model_config = ConfigDict(frozen=True)  # hashable : sert de clé au cache des clients LLM
@@ -31,12 +35,19 @@ class LLMProfile(BaseModel):
     label: str = ""  # libellé affiché (défaut : fournisseur et modèle)
     provider: Provider = "openai"
     model: str
-    base_url: str = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"  # API compatible OpenAI
+    # Adresse de l'API : compatible OpenAI (défaut : OVHcloud AI Endpoints) ou serveur Ollama
+    # (défaut : OLLAMA_BASE_URL). Renseignée par `llm_profiles` quand elle est vide.
+    base_url: str = ""
     api_key: str = ""
     json_mode: JsonMode = "json_schema"
     reasoning_effort: ReasoningEffort = ""
     price_input: float | None = None  # par million de tokens envoyés
     price_output: float | None = None  # par million de tokens générés (raisonnement compris)
+    num_ctx: int | None = None  # Ollama : taille du contexte (défaut : LLM_NUM_CTX)
+    # Bloc DEFAULT seulement, communs à toutes les configurations (cf. Settings._apply_default_profile) :
+    # les CV et les offres doivent être indexés par le même modèle d'embeddings, de même dimension.
+    embedding_model: str | None = None
+    embedding_dim: int | None = None
 
     @property
     def title(self) -> str:
@@ -56,7 +67,7 @@ class Settings(BaseSettings):
     # Fournisseur du LLM : « ollama » (local) ou « openai » (toute API compatible OpenAI, ex. OVHcloud
     # AI Endpoints). Les embeddings restent toujours sur Ollama (EMBEDDING_MODEL).
     llm_provider: Provider = "ollama"
-    llm_base_url: str = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"  # si LLM_PROVIDER=openai
+    llm_base_url: str = OPENAI_DEFAULT_URL  # si LLM_PROVIDER=openai
     llm_api_key: str = ""  # vide = accès anonyme (OVH : 1 requête par an et par modèle → clé indispensable)
     # Sortie structurée côté API OpenAI : « json_schema » (schéma imposé) ou « json_object » (JSON libre,
     # schéma donné dans le prompt) si le fournisseur ou le modèle refuse json_schema.
@@ -80,6 +91,21 @@ class Settings(BaseSettings):
     llm_profiles: dict[str, LLMProfile] = Field(default_factory=dict)
     embedding_model: str = "nomic-embed-text"
     embedding_dim: int = 768
+
+    @model_validator(mode="after")
+    def _apply_default_profile(self) -> Settings:
+        """Le bloc LLM_PROFILES__DEFAULT__* donne aussi les réglages communs : adresse d'Ollama (son
+        BASE_URL s'il est sur Ollama), NUM_CTX, EMBEDDING_MODEL et EMBEDDING_DIM. Ils priment sur
+        OLLAMA_BASE_URL, LLM_NUM_CTX, EMBEDDING_MODEL et EMBEDDING_DIM."""
+        block = next((p for name, p in self.llm_profiles.items() if name.lower() == DEFAULT_PROFILE), None)
+        if block is None:
+            return self
+        if block.provider == "ollama" and block.base_url:
+            self.ollama_base_url = block.base_url
+        self.llm_num_ctx = block.num_ctx or self.llm_num_ctx
+        self.embedding_model = block.embedding_model or self.embedding_model
+        self.embedding_dim = block.embedding_dim or self.embedding_dim
+        return self
 
     preferences_file: Path = Path("config/preferences.yaml")
     output_dir: Path = Path("data/output")
@@ -135,14 +161,19 @@ def get_settings() -> Settings:
 
 
 def llm_profiles(settings: Settings | None = None) -> dict[str, LLMProfile]:
-    """Configurations de LLM disponibles : « default » (variables LLM_*) puis celles de LLM_PROFILES."""
+    """Configurations de LLM disponibles : « default » en tête, puis les autres de LLM_PROFILES.
+
+    « default » : LLM_PROFILES__DEFAULT__* s'il est déclaré (bloc complet, il remplace alors les
+    variables LLM_*), sinon les variables LLM_* (LLM_PROVIDER, LLM_MODEL…).
+    """
     s = settings or get_settings()
-    default = LLMProfile(
+    declared = {name.lower(): profile for name, profile in s.llm_profiles.items()}
+    default = declared.pop(DEFAULT_PROFILE, None) or LLMProfile(
         name=DEFAULT_PROFILE,
         label="",
         provider=s.llm_provider,
         model=s.llm_model,
-        base_url=s.llm_base_url,
+        base_url=s.llm_base_url if s.llm_provider == "openai" else "",
         api_key=s.llm_api_key,
         json_mode=s.llm_json_mode,
         reasoning_effort=s.llm_reasoning_effort,
@@ -150,11 +181,19 @@ def llm_profiles(settings: Settings | None = None) -> dict[str, LLMProfile]:
         price_output=s.llm_price_output,
     )
     profiles = {DEFAULT_PROFILE: default}
-    for name, profile in sorted(s.llm_profiles.items()):
-        key = name.lower()
-        if key != DEFAULT_PROFILE:
-            profiles[key] = profile.model_copy(update={"name": key})
-    return profiles
+    profiles.update(sorted(declared.items()))
+    return {key: _complete(key, profile, s) for key, profile in profiles.items()}
+
+
+def _complete(name: str, profile: LLMProfile, s: Settings) -> LLMProfile:
+    """Nom, adresse et contexte par défaut d'une configuration."""
+    if profile.provider == "ollama":
+        base_url = profile.base_url or s.ollama_base_url
+    else:
+        base_url = profile.base_url or OPENAI_DEFAULT_URL
+    return profile.model_copy(
+        update={"name": name, "base_url": base_url.rstrip("/"), "num_ctx": profile.num_ctx or s.llm_num_ctx}
+    )
 
 
 # --------------------------------------------------------------------------- #
