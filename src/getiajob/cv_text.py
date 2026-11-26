@@ -39,6 +39,10 @@ SECTION_TITLES: dict[str, set[str]] = {
         "professional experience",
         "employment",
         "stages",
+        "parcours",
+        "missions",
+        "experiences significatives",
+        "experiences cles",
     },
     "education": {
         "formation",
@@ -81,6 +85,16 @@ SECTION_TITLES: dict[str, set[str]] = {
         "activites",
         "activites extra-professionnelles",
     },
+    "other": {
+        "benevolat",
+        "engagements",
+        "engagement associatif",
+        "vie associative",
+        "publications",
+        "references",
+        "distinctions",
+        "prix",
+    },
     "courses": {"cours", "cours suivis", "matieres", "modules"},
 }
 _ALL_TITLES = {t: cat for cat, titles in SECTION_TITLES.items() for t in titles}
@@ -97,13 +111,29 @@ def collapse_spaced_letters(line: str) -> str:
     return _SPACED_WORD.sub(lambda m: m.group(1).replace(" ", ""), line)
 
 
-def section_of(line: str) -> str | None:
-    """Catégorie de section si la ligne est un titre de section connu."""
-    key = _strip_accents(collapse_spaced_letters(line)).lower()
-    key = re.sub(r"[’`]", "'", key)
+_COMPOUND = re.compile(r"\s*(?:&|/|\+|,|\bet\b|\band\b)\s*")
+
+
+def _title_key(value: str) -> str:
+    key = re.sub(r"[’`]", "'", value)
     key = re.sub(r"[^\w' -]", " ", key)
-    key = re.sub(r"\s+", " ", key).strip(" -:")
-    return _ALL_TITLES.get(key)
+    return re.sub(r"\s+", " ", key).strip(" -:")
+
+
+def section_of(line: str) -> str | None:
+    """Catégorie de section si la ligne est un titre de section connu.
+
+    Titre composé (« FORMATION & CERTIFICATIONS », « LANGUES ET LOISIRS ») : catégorie de sa
+    première partie reconnue, à condition que toutes ses parties soient des titres connus.
+    """
+    text = _strip_accents(collapse_spaced_letters(line)).lower()
+    if category := _ALL_TITLES.get(_title_key(text)):
+        return category
+    parts = [_title_key(part) for part in _COMPOUND.split(text)]
+    parts = [part for part in parts if part]
+    if len(parts) > 1 and all(part in _ALL_TITLES for part in parts):
+        return _ALL_TITLES[parts[0]]
+    return None
 
 
 def _looks_like_title(line: str) -> bool:
@@ -119,8 +149,14 @@ def _looks_like_title(line: str) -> bool:
 
 
 def mark_headings(text: str) -> str:
-    """Normalise les lignes et balise les titres de sections par « ## »."""
+    """Normalise les lignes et balise les titres de sections par « ## ».
+
+    Dans la section des expériences, une ligne en majuscules qui n'est pas un titre connu est le
+    nom d'un employeur (« GROUPE BPCE ») : elle reste dans le texte, sans balise, pour ne pas être
+    séparée du poste qu'elle accompagne.
+    """
     out: list[str] = []
+    current: str | None = None  # catégorie de la section en cours
     for raw in text.split("\n"):
         line = collapse_spaced_letters(raw.replace(" ", " ").strip())
         line = re.sub(r"[ \t]+", " ", line)
@@ -128,7 +164,8 @@ def mark_headings(text: str) -> str:
             if out and out[-1] != "":
                 out.append("")
             continue
-        if section_of(line) or _looks_like_title(line):
+        category = section_of(line)
+        if category or (_looks_like_title(line) and current != "experience"):
             previous = next((x for x in reversed(out) if x), "")
             merged = f"{previous[3:]} {line.upper()}"
             if previous.startswith("## ") and section_of(merged):
@@ -136,10 +173,12 @@ def mark_headings(text: str) -> str:
                 while out and not out[-1]:
                     out.pop()
                 out[-1] = f"## {merged}"
+                current = section_of(merged)
                 continue
             if out and out[-1] != "":
                 out.append("")
             out.append(f"## {line.upper()}")
+            current = category
         else:
             out.append(line)
     return "\n".join(out).strip()
@@ -302,3 +341,22 @@ def extract_cv_text(data: bytes, file_name: str) -> str:
 def detected_sections(text: str) -> list[str]:
     """Titres « ## » présents dans un texte balisé (pour information / débogage)."""
     return [line[3:] for line in text.split("\n") if line.startswith("## ")]
+
+
+def section_text(text: str, category: str) -> str:
+    """Contenu des sections d'une catégorie (« experience »…) d'un texte balisé ; "" si absente.
+
+    Une section s'arrête au titre « ## » suivant. Plusieurs sections de la même catégorie
+    (« EXPÉRIENCES » puis « STAGES ») sont mises bout à bout.
+    """
+    parts: list[str] = []
+    inside = False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            inside = section_of(line[3:]) == category
+            if inside:
+                parts.append(line)
+            continue
+        if inside:
+            parts.append(line)
+    return "\n".join(parts).strip()
