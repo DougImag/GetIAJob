@@ -14,7 +14,7 @@ from importlib.metadata import PackageNotFoundError, version
 import httpx
 from sqlalchemy import func, select, text, update
 
-from getiajob.config import get_settings
+from getiajob.config import LLMProfile, get_settings
 from getiajob.db import (
     AuditLog,
     CVRecord,
@@ -25,6 +25,7 @@ from getiajob.db import (
     get_engine,
     session_scope,
 )
+from getiajob.services import llm_settings
 from getiajob.services.feedback import REASONS
 from getiajob.services.monitoring import audit
 
@@ -130,6 +131,98 @@ def activity(days: int = 30) -> Activity:
         new_cvs=cvs["new"],
         per_day=per_day,
         cv_failures=cv_failures,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Consommation du LLM (tokens, coût estimé)
+# --------------------------------------------------------------------------- #
+
+# Étape enregistrée (nom de la mesure `timed("llm", …)`) → usage affiché
+USAGE_LABEL_SQL = """
+    CASE WHEN step LIKE 'cv\\_%' THEN 'Analyse de CV'
+         WHEN step = 'evaluation' THEN 'Évaluation des offres'
+         WHEN step = 'plan_requetes' THEN 'Préparation des recherches'
+         WHEN step = 'alerte_mail' THEN 'Alertes e-mail'
+         ELSE 'Autre' END
+"""
+_USAGE_SUMS = """
+    count(*) AS appels,
+    coalesce(sum(input_tokens), 0) AS envoyes,
+    coalesce(sum(output_tokens), 0) AS generes,
+    coalesce(sum(reasoning_tokens), 0) AS raisonnement,
+    sum(cost) AS cout
+"""
+
+
+@dataclass
+class LLMUsageReport:
+    calls: int
+    input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    cost: float | None  # None : aucun appel tarifé sur la période
+    per_day: list[dict] = field(default_factory=list)  # jour, type (Envoyés / Générés), n
+    per_usage: list[dict] = field(default_factory=list)  # usage, appels, envoyes, generes, …
+    per_model: list[dict] = field(default_factory=list)
+    per_user: list[dict] = field(default_factory=list)  # email (None : hors compte), …
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+def llm_usage(days: int = 30) -> LLMUsageReport:
+    since = _since(days)
+    totals = _rows(f"SELECT {_USAGE_SUMS} FROM llm_usage WHERE created_at >= :since", since=since)[0]
+    per_day = _rows(
+        """
+        SELECT date_trunc('day', created_at)::date AS jour, 'Envoyés' AS type, sum(input_tokens) AS n
+        FROM llm_usage WHERE created_at >= :since GROUP BY 1
+        UNION ALL
+        SELECT date_trunc('day', created_at)::date, 'Générés', sum(output_tokens)
+        FROM llm_usage WHERE created_at >= :since GROUP BY 1
+        ORDER BY 1
+        """,
+        since=since,
+    )
+    per_usage = _rows(
+        f"""
+        SELECT {USAGE_LABEL_SQL} AS usage, {_USAGE_SUMS}
+        FROM llm_usage WHERE created_at >= :since
+        GROUP BY 1 ORDER BY sum(input_tokens) + sum(output_tokens) DESC
+        """,
+        since=since,
+    )
+    per_model = _rows(
+        f"""
+        SELECT provider AS fournisseur, model AS modele, {_USAGE_SUMS}
+        FROM llm_usage WHERE created_at >= :since
+        GROUP BY 1, 2 ORDER BY sum(input_tokens) + sum(output_tokens) DESC
+        """,
+        since=since,
+    )
+    per_user = _rows(
+        f"""
+        SELECT u.email,
+               count(*) FILTER (WHERE l.step LIKE 'cv\\_%') AS appels_cv,
+               count(*) FILTER (WHERE l.step = 'evaluation') AS offres_evaluees,
+               {_USAGE_SUMS}
+        FROM llm_usage l LEFT JOIN users u ON u.id = l.user_id
+        WHERE l.created_at >= :since GROUP BY 1 ORDER BY sum(input_tokens) + sum(output_tokens) DESC
+        """,
+        since=since,
+    )
+    return LLMUsageReport(
+        calls=totals["appels"],
+        input_tokens=int(totals["envoyes"]),
+        output_tokens=int(totals["generes"]),
+        reasoning_tokens=int(totals["raisonnement"]),
+        cost=float(totals["cout"]) if totals["cout"] is not None else None,
+        per_day=per_day,
+        per_usage=per_usage,
+        per_model=per_model,
+        per_user=per_user,
     )
 
 
@@ -553,7 +646,8 @@ def check_ollama() -> Check:
     except Exception as exc:
         return Check("Ollama", False, f"Injoignable ({type(exc).__name__})")
     # Avec un LLM distant (LLM_PROVIDER=openai), Ollama ne sert plus qu'aux embeddings
-    needed = (s.llm_model, s.embedding_model) if s.llm_provider == "ollama" else (s.embedding_model,)
+    llm = llm_settings.current()
+    needed = (llm.model, s.embedding_model) if llm.provider == "ollama" else (s.embedding_model,)
     missing = [m for m in needed if m not in tags and f"{m}:latest" not in tags]
     detail = f"{len(tags)} modèle(s) installé(s) · en mémoire : {', '.join(loaded) or 'aucun'}"
     if missing:
@@ -561,27 +655,27 @@ def check_ollama() -> Check:
     return Check("Ollama", True, detail, time.monotonic() - start)
 
 
-def check_remote_llm() -> Check | None:
-    """API compatible OpenAI (LLM_PROVIDER=openai) : joignable et modèle proposé. None si LLM sur Ollama."""
-    s = get_settings()
-    if s.llm_provider != "openai":
+def check_remote_llm(profile: LLMProfile | None = None) -> Check | None:
+    """API compatible OpenAI du LLM actif (ou de `profile`) : joignable et modèle proposé. None si Ollama."""
+    p = profile or llm_settings.current()
+    if p.provider != "openai":
         return None
     start = time.monotonic()
-    headers = {"Authorization": f"Bearer {s.llm_api_key}"} if s.llm_api_key else {}
+    headers = {"Authorization": f"Bearer {p.api_key}"} if p.api_key else {}
     try:
         with httpx.Client(timeout=10, headers=headers) as client:
-            data = client.get(f"{s.llm_base_url.rstrip('/')}/models").raise_for_status().json()
+            data = client.get(f"{p.base_url.rstrip('/')}/models").raise_for_status().json()
     except httpx.HTTPStatusError as exc:
         hint = " (clé API refusée)" if exc.response.status_code in (401, 403) else ""
         body = exc.response.text[:150]
         return Check("LLM distant", False, f"HTTP {exc.response.status_code}{hint} : {body}")
     except Exception as exc:
-        return Check("LLM distant", False, f"Injoignable ({type(exc).__name__}) · {s.llm_base_url}")
+        return Check("LLM distant", False, f"Injoignable ({type(exc).__name__}) · {p.base_url}")
     ids = {m.get("id") for m in data.get("data", [])}
-    access = "clé API" if s.llm_api_key else "sans clé API (accès anonyme très limité)"
-    if ids and s.llm_model not in ids:
-        return Check("LLM distant", False, f"Modèle {s.llm_model} non proposé par {s.llm_base_url}")
-    return Check("LLM distant", True, f"{s.llm_model} · {access}", time.monotonic() - start)
+    access = "clé API" if p.api_key else "sans clé API (accès anonyme très limité)"
+    if ids and p.model not in ids:
+        return Check("LLM distant", False, f"Modèle {p.model} non proposé par {p.base_url}")
+    return Check("LLM distant", True, f"{p.model} · {access}", time.monotonic() - start)
 
 
 def check_mailbox() -> Check:
@@ -626,6 +720,9 @@ AUDIT_LABELS = {
     "metrics.prune": "Mesures anciennes supprimées",
     "backup": "Sauvegarde de la base",
     "alert.notify": "Alerte envoyée",
+    "settings.llm_profile": "LLM changé",
+    "settings.token_limit": "Limite de tokens modifiée",
+    "user.token_limit": "Limite de tokens d'un utilisateur",
 }
 
 

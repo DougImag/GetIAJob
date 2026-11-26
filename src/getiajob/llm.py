@@ -16,7 +16,9 @@ from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from pydantic import BaseModel
 
-from getiajob.config import get_settings
+from getiajob.config import LLMProfile, get_settings
+from getiajob.services import llm_settings
+from getiajob.services.usage import record_message
 
 M = TypeVar("M", bound=BaseModel)
 
@@ -31,13 +33,13 @@ _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
 
 def uses_ollama_llm() -> bool:
-    return get_settings().llm_provider == "ollama"
+    return llm_settings.current().provider == "ollama"
 
 
 def llm_endpoint() -> str:
-    """Adresse du LLM, pour l'affichage et les diagnostics."""
-    s = get_settings()
-    return s.ollama_base_url if uses_ollama_llm() else s.llm_base_url
+    """Adresse du LLM actif, pour l'affichage et les diagnostics."""
+    profile = llm_settings.current()
+    return get_settings().ollama_base_url if profile.provider == "ollama" else profile.base_url
 
 
 def _drop_empty_auth(request: httpx.Request) -> None:
@@ -51,28 +53,35 @@ async def _drop_empty_auth_async(request: httpx.Request) -> None:
     _drop_empty_auth(request)
 
 
-@lru_cache
-def get_chat_model() -> BaseChatModel:
+def get_chat_model(profile: LLMProfile | None = None) -> BaseChatModel:
+    """Client du LLM actif (Admin › Paramètres), ou de la configuration `profile` donnée."""
+    return _chat_model(profile or llm_settings.current())
+
+
+@lru_cache(maxsize=8)
+def _chat_model(profile: LLMProfile) -> BaseChatModel:
     s = get_settings()
-    if s.llm_provider == "openai":
+    if profile.provider == "openai":
         from langchain_openai import ChatOpenAI
 
-        anonymous = not s.llm_api_key
+        anonymous = not profile.api_key
         return ChatOpenAI(
-            model=s.llm_model,
-            base_url=s.llm_base_url,
-            api_key=s.llm_api_key or "anonymous",
+            model=profile.model,
+            base_url=profile.base_url,
+            api_key=profile.api_key or "anonymous",
             temperature=s.llm_temperature,
             max_tokens=s.llm_max_tokens,
             timeout=s.llm_timeout,
             max_retries=s.llm_max_retries,
+            # Non envoyé si vide : certains modèles sans raisonnement refusent le paramètre.
+            reasoning_effort=profile.reasoning_effort or None,
             http_client=httpx.Client(event_hooks={"request": [_drop_empty_auth]} if anonymous else {}),
             http_async_client=httpx.AsyncClient(
                 event_hooks={"request": [_drop_empty_auth_async]} if anonymous else {}
             ),
         )
     return ChatOllama(
-        model=s.llm_model,
+        model=profile.model,
         base_url=s.ollama_base_url,
         temperature=s.llm_temperature,
         # Le contexte par défaut d'Ollama est trop court pour un CV + une offre complète.
@@ -130,6 +139,31 @@ def _with_schema_hint(js: dict[str, Any]) -> RunnableLambda:
     return RunnableLambda(add)
 
 
+def input_chars(value: Any) -> int:
+    """Caractères envoyés au LLM (contenu des messages), pour calibrer l'estimation des tokens."""
+    messages = value.to_messages() if isinstance(value, PromptValue) else value
+    if isinstance(messages, str):
+        return len(messages)
+    total = 0
+    for message in messages:
+        content = message[1] if isinstance(message, tuple) else getattr(message, "content", "")
+        total += len(content) if isinstance(content, str) else len(str(content))
+    return total
+
+
+def _counted(model: Runnable) -> RunnableLambda:
+    """Appel du modèle qui enregistre les tokens consommés (et les caractères envoyés)."""
+
+    def call(value: Any) -> BaseMessage:
+        llm_settings.check_budget()  # limite de tokens atteinte : appel refusé (TokenBudgetExceeded)
+        message = model.invoke(value)
+        # Avant la lecture du JSON : une réponse illisible a quand même été facturée
+        record_message(message, input_chars(value))
+        return message
+
+    return RunnableLambda(call)
+
+
 def structured(schema: type[M]) -> Runnable[Any, M]:
     """Équivalent de `with_structured_output(schema)`, avec les listes bornées (cf. MAX_LIST_ITEMS)."""
 
@@ -137,14 +171,15 @@ def structured(schema: type[M]) -> Runnable[Any, M]:
         return schema.model_validate_json(clean_json(message.content))
 
     js = bounded_schema(schema)
-    s = get_settings()
-    if s.llm_provider == "ollama":
-        return get_chat_model().bind(format=js) | RunnableLambda(parse)
-    if s.llm_json_mode == "json_schema":
+    profile = llm_settings.current()
+    model = get_chat_model(profile)
+    if profile.provider == "ollama":
+        return _counted(model.bind(format=js)) | RunnableLambda(parse)
+    if profile.json_mode == "json_schema":
         response_format = {"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": js}}
-        return get_chat_model().bind(response_format=response_format) | RunnableLambda(parse)
-    model = get_chat_model().bind(response_format={"type": "json_object"})
-    return _with_schema_hint(js) | model | RunnableLambda(parse)
+        return _counted(model.bind(response_format=response_format)) | RunnableLambda(parse)
+    json_model = model.bind(response_format={"type": "json_object"})
+    return _with_schema_hint(js) | _counted(json_model) | RunnableLambda(parse)
 
 
 @lru_cache

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from html import escape
+from urllib.parse import urlsplit
 
 import streamlit as st
 
@@ -17,9 +18,10 @@ from getiajob.services.access import (
     requests_open,
     revoke,
 )
-from getiajob.services.admin import UserRow, delete_user, list_users, set_admin
+from getiajob.services.admin import UserRow, delete_user, list_users, set_admin, set_token_limit
 from getiajob.services.users import AuthError, SessionUser
 from getiajob.web.state import go, require_admin, start_impersonation
+from getiajob.web.views.admin_format import tokens_label
 from getiajob.web.views.cv import ico
 
 CSS = """
@@ -45,6 +47,8 @@ CSS = """
   .gj-au-meta { display: flex; flex-wrap: wrap; gap: .2rem .9rem; margin-top: .3rem; font-size: .78rem;
     color: var(--gj-muted); }
   .gj-au-meta span { display: inline-flex; align-items: center; gap: .25rem; }
+  .gj-au-meta span.ai-warn { color: #c2410c; font-weight: 600; }
+  .gj-au-meta span.ai-full { color: #dc2626; font-weight: 700; }
   .gj-au-tag.pending { background: rgba(245, 158, 11, .16); color: #b45309; }
   .gj-au-tag.invited { background: rgba(99, 102, 241, .14); color: var(--gj-primary); }
   .gj-au-tag.used { background: rgba(34, 197, 94, .14); color: #15803d; }
@@ -85,6 +89,7 @@ def _identity(row: UserRow, me: int) -> str:
         f"<span>{ico('file', 13)}{row.n_cvs} CV</span>"
         f"<span>{ico('search', 13)}{row.n_searches} recherche(s)</span>"
         f"<span>{ico('heart', 13)}{row.n_feedback} avis</span>"
+        f"{_ai_meta(row)}"
     )
     return (
         f'<div class="gj-au"><div class="gj-au-av{" admin" if row.is_admin else ""}">{escape(_initials(row))}'
@@ -94,12 +99,58 @@ def _identity(row: UserRow, me: int) -> str:
     )
 
 
+def _ai_meta(row: UserRow) -> str:
+    """Consommation IA du mois, rapportée à la limite de l'utilisateur s'il en a une."""
+    used = tokens_label(row.month_tokens)
+    if not row.token_limit:
+        return f"<span>{ico('sparkles', 13)}IA : {used} tokens ce mois</span>"
+    pct = round(100 * row.month_tokens / row.token_limit)
+    tone = ' class="ai-full"' if pct >= 100 else ' class="ai-warn"' if pct >= 80 else ""
+    return (
+        f"<span{tone}>{ico('sparkles', 13)}IA : {used} / {tokens_label(row.token_limit)} tokens "
+        f"ce mois ({pct} %)</span>"
+    )
+
+
+def _token_limit_popover(row: UserRow, admin: SessionUser) -> None:
+    # Libellé court, la limite figurant déjà dans « IA : … / … tokens ce mois » : boutons sur une ligne
+    with st.popover("Limite IA", icon=":material/data_usage:", help="Limite mensuelle de tokens de l'IA"):
+        st.markdown(f"**Limite mensuelle de tokens** pour {escape(row.display_name)}")
+        st.caption(
+            f"Consommés depuis le 1er du mois : {tokens_label(row.month_tokens)} tokens (tous LLM, Ollama "
+            "compris). Une fois la limite atteinte, ses analyses de CV, recherches et alertes e-mail sont "
+            "bloquées jusqu'au mois suivant. S'ajoute à la limite globale d'Admin › Paramètres."
+        )
+        enabled = st.toggle("Limiter", value=bool(row.token_limit), key=f"tl-on-{row.id}")
+        tokens = st.number_input(
+            "Tokens par mois",
+            min_value=1_000,
+            step=100_000,
+            value=row.token_limit or 500_000,
+            disabled=not enabled,
+            key=f"tl-n-{row.id}",
+        )
+        new = int(tokens) if enabled else None
+        if st.button(
+            "Enregistrer", type="primary", icon=":material/save:", key=f"tl-save-{row.id}",
+            disabled=new == row.token_limit,
+        ):  # fmt: skip
+            message = (
+                f"Limite de {row.display_name} : {tokens_label(new)} tokens par mois"
+                if new
+                else f"Limite de {row.display_name} retirée"
+            )
+            _run(lambda: set_token_limit(admin.id, row.id, new), message)
+
+
 def _user_card(row: UserRow, admin: SessionUser) -> None:
     me = admin.id
     with st.container(border=True, key=f"gj_user_{row.id}"):
-        c1, c2 = st.columns([4, 3], vertical_alignment="center")
+        c1, c2 = st.columns([1, 1], vertical_alignment="center")
         c1.markdown(_identity(row, me), unsafe_allow_html=True)
         if row.id == me:
+            with c2.container(horizontal=True, horizontal_alignment="right", gap="small"):
+                _token_limit_popover(row, admin)
             c2.caption("Ton propre rôle ne peut pas être modifié ici.")
             return
         with c2.container(horizontal=True, horizontal_alignment="right", gap="small"):
@@ -128,6 +179,7 @@ def _user_card(row: UserRow, admin: SessionUser) -> None:
                 )
                 if st.button("Supprimer définitivement", type="primary", key=f"del-{row.id}"):
                     _run(lambda: delete_user(me, row.id), f"Compte `{row.email}` supprimé")
+            _token_limit_popover(row, admin)  # le plus à droite
 
 
 LAST_INVITE_KEY = "_last_invitation"
@@ -152,9 +204,19 @@ def _request_identity(row: RequestRow) -> str:
     )
 
 
+def _app_url() -> str | None:
+    """Adresse de l'application vue par le navigateur (ex. http://localhost:8501), pour le lien d'invitation
+    quand PUBLIC_URL n'est pas renseigné."""
+    try:
+        parts = urlsplit(st.context.url or "")
+    except Exception:  # noqa: BLE001 - hors navigateur (tests)
+        return None
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else None
+
+
 def _invite(admin: SessionUser, email: str, full_name: str | None = None, request_id: int | None = None):
     try:
-        st.session_state[LAST_INVITE_KEY] = invite(admin.id, email, full_name, request_id)
+        st.session_state[LAST_INVITE_KEY] = invite(admin.id, email, full_name, request_id, _app_url())
     except AuthError as exc:
         st.error(str(exc))
         return

@@ -67,8 +67,11 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.strip().encode()).hexdigest()
 
 
-def invitation_link(token: str) -> str | None:
-    base = get_settings().public_url.strip().rstrip("/")
+def invitation_link(token: str, fallback_url: str | None = None) -> str | None:
+    """Lien qui ouvre directement le formulaire « Créer un compte », code pré-rempli.
+
+    Adresse de base : PUBLIC_URL, sinon `fallback_url` (adresse de la page d'où l'administrateur invite)."""
+    base = (get_settings().public_url or fallback_url or "").strip().rstrip("/")
     return f"{base}/connexion?invitation={token}" if base else None
 
 
@@ -257,12 +260,17 @@ def pending_count() -> int:
 
 
 def invite(
-    actor_id: int, email: str, full_name: str | None = None, request_id: int | None = None
+    actor_id: int,
+    email: str,
+    full_name: str | None = None,
+    request_id: int | None = None,
+    base_url: str | None = None,
 ) -> Invitation:
     """Crée (ou renouvelle) une invitation et l'envoie par e-mail.
 
     `request_id` : demande acceptée ou invitation à renvoyer ; sinon invitation directe d'une adresse
     (une demande en attente pour cette adresse est alors réutilisée).
+    `base_url` : adresse de l'application vue par l'administrateur, utilisée si PUBLIC_URL est vide.
     """
     email = normalize_email(email)
     if not EMAIL_RE.match(email):
@@ -296,7 +304,7 @@ def invite(
     from getiajob.services.monitoring import audit
 
     audit(actor_id, "invitation", email)
-    link = invitation_link(token)
+    link = invitation_link(token, base_url)
     try:
         _send_invitation(email, name, token, link, expires)
     except Exception as exc:  # noqa: BLE001 - l'administrateur peut transmettre le lien lui-même
@@ -326,7 +334,45 @@ def _send_invitation(email: str, name: str | None, token: str, link: str | None,
         "",
         "À bientôt sur GetIAJob !",
     ]
-    send_mail([email], "Ton invitation à GetIAJob", "\n".join(lines))
+    send_mail(
+        [email],
+        "Ton invitation à GetIAJob",
+        "\n".join(lines),
+        _invitation_html(email, name, token, link, until),
+    )
+
+
+def _invitation_html(email: str, name: str | None, token: str, link: str | None, until: datetime) -> str:
+    """Version HTML du mail : bouton vers le formulaire d'inscription, code en repli."""
+    from html import escape
+
+    hello = f"Bonjour {escape(name)}," if name else "Bonjour,"
+    if link:
+        action = (
+            f"<p>Crée ton compte avec l'adresse <b>{escape(email)}</b> :</p>"
+            f'<p style="margin:24px 0"><a href="{escape(link)}" style="background:#4f46e5;color:#fff;'
+            'text-decoration:none;font-weight:700;padding:12px 22px;border-radius:10px;display:inline-block">'
+            "Créer mon compte</a></p>"
+            '<p style="color:#64748b;font-size:13px">Le formulaire s\'ouvre avec ton code déjà saisi. '
+            "Si le bouton ne fonctionne pas, copie ce lien :<br>"
+            f'<a href="{escape(link)}">{escape(link)}</a></p>'
+            '<p style="color:#64748b;font-size:13px">Ou va sur la page de connexion, onglet '
+            "« Créer un compte », et saisis ce code :</p>"
+        )
+    else:
+        action = (
+            "<p>Va sur la page de connexion de GetIAJob, onglet « Créer un compte », et saisis ton adresse "
+            f"(<b>{escape(email)}</b>) avec ce code d'invitation :</p>"
+        )
+    return (
+        '<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:15px;'
+        'color:#0f172a;line-height:1.55;max-width:560px">'
+        f"<p>{hello}</p><p>Tu es invité(e) à rejoindre <b>GetIAJob</b>.</p>{action}"
+        '<p style="font-family:Menlo,Consolas,monospace;font-size:15px;background:#f1f5f9;padding:10px 14px;'
+        f'border-radius:8px;display:inline-block">{escape(token)}</p>'
+        f'<p style="color:#64748b;font-size:13px">Invitation valable jusqu\'au {until:%d/%m/%Y à %H:%M}, '
+        "à usage unique.</p><p>À bientôt sur GetIAJob !</p></div>"
+    )
 
 
 def _decide(actor_id: int, request_id: int, allowed: tuple[str, ...], status: str, action: str) -> None:

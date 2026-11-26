@@ -65,12 +65,13 @@ def doctor() -> None:
     except Exception as exc:
         ok = False
         console.print(f"[red]✘ Ollama ({s.ollama_base_url}) : {exc}[/red]")
+    from getiajob.llm import llm_endpoint
     from getiajob.services.supervision import check_remote_llm
 
     if (remote := check_remote_llm()) is not None:
         ok = ok and bool(remote.ok)
         color, mark = ("green", "✔") if remote.ok else ("red", "✘")
-        console.print(f"[{color}]{mark} LLM distant ({s.llm_base_url}) : {remote.detail}[/{color}]")
+        console.print(f"[{color}]{mark} LLM distant ({llm_endpoint()}) : {remote.detail}[/{color}]")
         if remote.ok:
             # La liste des modèles est publique : seul un vrai appel (1 token) vérifie la clé et le quota.
             try:
@@ -86,8 +87,10 @@ def doctor() -> None:
 
 def _ollama_models() -> tuple[str, ...]:
     """Modèles servis par Ollama : le LLM seulement si LLM_PROVIDER=ollama, toujours les embeddings."""
-    s = get_settings()
-    return (s.llm_model, s.embedding_model) if s.llm_provider == "ollama" else (s.embedding_model,)
+    from getiajob.services.llm_settings import current
+
+    s, llm = get_settings(), current()
+    return (llm.model, s.embedding_model) if llm.provider == "ollama" else (s.embedding_model,)
 
 
 @app.command("pull-models")

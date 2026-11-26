@@ -24,6 +24,12 @@ def test_graph_compiles_and_routes():
     assert _after_cv({}) == "scrape_jobs"
 
 
+def test_graph_can_stop_before_ranking():
+    """Interface web : collecte seule, l'évaluation par le LLM attend la confirmation."""
+    nodes = set(build_graph(rank=False).get_graph().nodes)
+    assert {"analyze_cv", "scrape_jobs"} <= nodes and "rank_jobs" not in nodes
+
+
 def test_read_only_guard_detects_writes():
     from getiajob.db.session import is_write
 

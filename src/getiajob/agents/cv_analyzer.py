@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -273,7 +274,11 @@ def extract_profile(text: str, progress: Progress = _noop) -> CVProfile:
     """Texte balisé du CV → profil structuré (sans accès à la base)."""
     workers = max(1, get_settings().llm_concurrency)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {name: pool.submit(_run_task, name, text, progress) for name in TASKS}
+        # Chaque tâche reçoit une copie du contexte : utilisateur à qui imputer les tokens (`usage`)
+        futures = {
+            name: pool.submit(contextvars.copy_context().run, _run_task, name, text, progress)
+            for name in TASKS
+        }
         results = {name: future.result() for name, future in futures.items()}
     errors = [r for r in results.values() if isinstance(r, Exception)]
     if len(errors) == len(results):

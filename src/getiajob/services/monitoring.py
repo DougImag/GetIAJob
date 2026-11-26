@@ -49,10 +49,19 @@ def record(
 
 @contextmanager
 def timed(kind: str, name: str, count: int = 1) -> Iterator[None]:
-    """Mesure la durée du bloc ; une exception est enregistrée comme échec puis relancée."""
+    """Mesure la durée du bloc ; une exception est enregistrée comme échec puis relancée.
+
+    Pour un appel au LLM (`kind="llm"`), `name` sert aussi d'étape au suivi des tokens (`usage`).
+    """
+    from getiajob.services import usage
+
     start = time.monotonic()
     try:
-        yield
+        if kind == "llm":
+            with usage.step(name):
+                yield
+        else:
+            yield
     except Exception as exc:
         record(
             kind,

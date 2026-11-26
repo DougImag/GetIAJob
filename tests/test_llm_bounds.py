@@ -2,6 +2,7 @@ from pydantic import BaseModel
 
 from getiajob.llm import MAX_LIST_ITEMS, bounded_schema
 from getiajob.schemas import ExperienceExtraction, SkillsExtraction
+from getiajob.services import llm_settings
 
 
 def _arrays(node):
@@ -38,7 +39,7 @@ def test_parse_with_structured_runnable(monkeypatch):
 
     fake = RunnableLambda(lambda _: AIMessage(content='{"items": ["a", "b"]}'))
     fake.bind = lambda **kw: fake  # type: ignore[method-assign]
-    monkeypatch.setattr(llm, "get_chat_model", lambda: fake)
+    monkeypatch.setattr(llm, "get_chat_model", lambda *a: fake)
     assert llm.structured(Out).invoke("x") == Out(items=["a", "b"])
 
 
@@ -64,6 +65,7 @@ def _openai_settings(monkeypatch, **extra):
 
     s = Settings(llm_provider="openai", llm_model="Olala-v1.0-mini-7A1B", **extra)
     monkeypatch.setattr(llm, "get_settings", lambda: s)
+    monkeypatch.setattr(llm_settings, "get_settings", lambda: s)
     return llm
 
 
@@ -84,7 +86,7 @@ def test_openai_provider_json_schema(monkeypatch):
         return fake
 
     fake.bind = bind  # type: ignore[method-assign]
-    monkeypatch.setattr(llm, "get_chat_model", lambda: fake)
+    monkeypatch.setattr(llm, "get_chat_model", lambda *a: fake)
     assert llm.structured(Out).invoke("x") == Out(items=["a"])
     fmt = seen["response_format"]
     assert fmt["type"] == "json_schema"
@@ -107,7 +109,7 @@ def test_openai_provider_json_object_puts_schema_in_prompt(monkeypatch):
 
     fake = RunnableLambda(answer)
     fake.bind = lambda **kw: fake  # type: ignore[method-assign]
-    monkeypatch.setattr(llm, "get_chat_model", lambda: fake)
+    monkeypatch.setattr(llm, "get_chat_model", lambda *a: fake)
     assert llm.structured(Out).invoke([("human", "CV")]) == Out(items=[])
     assert "maxItems" in prompts[0][-1].content
 
@@ -116,7 +118,7 @@ def test_openai_chat_model_without_key_is_anonymous(monkeypatch):
     import httpx
 
     llm = _openai_settings(monkeypatch)
-    llm.get_chat_model.cache_clear()
+    llm._chat_model.cache_clear()
     try:
         model = llm.get_chat_model()
         assert type(model).__name__ == "ChatOpenAI"
@@ -124,4 +126,24 @@ def test_openai_chat_model_without_key_is_anonymous(monkeypatch):
         llm._drop_empty_auth(request)
         assert "Authorization" not in request.headers
     finally:
-        llm.get_chat_model.cache_clear()
+        llm._chat_model.cache_clear()
+
+
+def test_openai_reasoning_effort(monkeypatch):
+    llm = _openai_settings(monkeypatch, llm_api_key="k", llm_reasoning_effort="low")
+    llm._chat_model.cache_clear()
+    try:
+        assert llm.get_chat_model().reasoning_effort == "low"
+    finally:
+        llm._chat_model.cache_clear()
+
+
+def test_openai_reasoning_effort_unset_not_sent(monkeypatch):
+    llm = _openai_settings(monkeypatch, llm_api_key="k")
+    llm._chat_model.cache_clear()
+    try:
+        model = llm.get_chat_model()
+        assert model.reasoning_effort is None
+        assert "reasoning_effort" not in model._default_params
+    finally:
+        llm._chat_model.cache_clear()
