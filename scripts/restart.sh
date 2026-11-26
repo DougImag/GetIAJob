@@ -30,6 +30,21 @@ if [ -n "$BUILD" ] && OLD_CID="$(docker compose ps -q web 2>/dev/null)" && [ -n 
     OLD_IMAGE="$(docker inspect -f '{{.Image}}' "$OLD_CID" 2>/dev/null)"
 fi
 
+# Production (image téléchargée, pas de --build) : relancer la version déployée, c'est-à-dire l'image du
+# commit courant du dépôt, et non l'étiquette « latest » locale qui peut désigner une ancienne image.
+if [ -z "$BUILD" ] && [ -z "${GETIAJOB_TAG:-}" ] && SHA="$(git rev-parse HEAD 2>/dev/null)"; then
+    IMAGE_NAME="$(docker compose config --images web 2>/dev/null | head -n 1)"
+    case "$IMAGE_NAME" in
+        *:latest)
+            if docker image inspect "${IMAGE_NAME%:*}:$SHA" >/dev/null 2>&1; then
+                GETIAJOB_TAG="$SHA"
+                export GETIAJOB_TAG
+                echo "→ Version déployée : ${SHA%"${SHA#???????}"}"
+            fi
+            ;;
+    esac
+fi
+
 echo "→ Recréation du conteneur web…"
 # --no-deps : ne touche pas à la base ; --force-recreate : relit le .env même si rien n'a changé
 docker compose up -d --no-deps --force-recreate $BUILD web || exit 1
