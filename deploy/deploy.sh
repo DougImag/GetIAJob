@@ -32,6 +32,12 @@ while [ "$i" -lt 30 ]; do
     status="$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || echo unknown)"
     if [ "$status" = "healthy" ]; then
         echo "✔ Application en ligne ($TAG)"
+        # « latest » local = version déployée : un redémarrage sans GETIAJOB_TAG (scripts/restart.sh,
+        # docker compose up) relance cette version, et non une ancienne image restée en cache.
+        image="$(docker inspect -f '{{.Config.Image}}' "$container")"
+        if [ "${image##*:}" != "latest" ]; then
+            docker tag "$image" "${image%:*}:latest"
+        fi
         docker image prune -f >/dev/null
         exit 0
     fi
