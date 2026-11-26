@@ -16,6 +16,7 @@ from getiajob.cv_pdf import render_cv_pdf
 from getiajob.cv_text import detected_sections
 from getiajob.llm import uses_ollama_llm
 from getiajob.schemas import CVProfile, Experience
+from getiajob.services import estimate
 from getiajob.services.cvs import (
     CVSummary,
     analysis_progress,
@@ -27,6 +28,7 @@ from getiajob.services.cvs import (
 from getiajob.services.users import SessionUser
 from getiajob.web.state import get_runner
 from getiajob.web.views import cv_edit
+from getiajob.web.views.admin_format import budget_status, estimate_label, estimate_note
 from getiajob.web.views.cv_edit import SENIORITY
 from getiajob.web.views.results import icon
 
@@ -569,6 +571,16 @@ def _cv_card(user_id: int, cv: CVSummary, is_current: bool) -> None:
         if cv.profile is not None and cv.profile.edited_at:
             title += "  :violet-badge[:material/edit: Corrigé manuellement]"
         c1.markdown(f"{title}  \n:gray[Importé le {cv.created_at:%d/%m/%Y à %H:%M}]")
+        if not cv.analyzing and (cv_text := get_cv_text(user_id, cv.id)):
+            est = estimate.cv_analysis(cv_text)
+            msg, level = budget_status(est.total, user_id)
+            c1.caption(
+                f":material/token: {'Analyse' if cv.profile is None else 'Ré-analyse'} estimée : "
+                f"{estimate_label(est)}{estimate_note(est)}"
+                + (f" · :{'red' if level == 'block' else 'orange'}[{msg}]" if msg and level != "ok" else ""),
+                help="Tokens envoyés calculés d'après le texte du CV ; tokens générés d'après les "
+                "dernières analyses faites avec le même modèle (Admin › Supervision › Consommation IA).",
+            )
 
         # Actions groupées à droite, côte à côte (et non réparties sur trois colonnes)
         with c2.container(horizontal=True, horizontal_alignment="right", gap="small"):
@@ -620,11 +632,12 @@ def _cv_card(user_id: int, cv: CVSummary, is_current: bool) -> None:
             if p is None:
                 return
         elif cv.analysis_status == "failed":
-            hint = (
-                "Ollama démarré ? modèle téléchargé ?"
-                if uses_ollama_llm()
-                else "API du LLM joignable ? clé LLM_API_KEY valide ?"
-            )
+            if "TokenBudgetExceeded" in (cv.analysis_error or ""):
+                hint = "limite de tokens atteinte"
+            elif uses_ollama_llm():
+                hint = "Ollama démarré ? modèle téléchargé ?"
+            else:
+                hint = "API du LLM joignable ? clé API valide ? (Admin › Paramètres › Tester)"
             st.error(
                 f"L'IA n'a pas pu analyser ce CV ({hint}).  \n`{(cv.analysis_error or '')[:300]}`",
                 icon=":material/error:",

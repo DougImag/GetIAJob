@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -14,7 +15,6 @@ from sqlalchemy.orm import Session
 from getiajob.config import (
     Expectations,
     Preferences,
-    get_settings,
     keyword_in,
     preferences_from_state,
 )
@@ -22,6 +22,7 @@ from getiajob.db import CVRecord, JobMatch, JobOffer, session_scope
 from getiajob.llm import get_embeddings, structured
 from getiajob.schemas import CVProfile, JobAssessment
 from getiajob.seniority import level_check, level_prompt, max_years
+from getiajob.services import llm_settings
 from getiajob.services.cancellation import check_cancelled
 from getiajob.services.feedback import feedback_adjustment
 from getiajob.services.monitoring import record, timed
@@ -120,7 +121,7 @@ def assessment_key(exp: Expectations, levels: list[str] | None = None) -> str:
         {
             "exp": exp.model_dump(mode="json"),
             "levels": sorted(levels or []),
-            "model": get_settings().llm_model,
+            "model": llm_settings.current().model,
             "prompt": hashlib.sha256(ASSESS_PROMPT.encode()).hexdigest()[:12],
         },
         sort_keys=True,
@@ -128,9 +129,10 @@ def assessment_key(exp: Expectations, levels: list[str] | None = None) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def assess_job(
-    profile: CVProfile, exp: Expectations, job: JobOffer, levels: list[str] | None = None
-) -> JobAssessment:
+def assessment_messages(
+    profile_text: str, exp: Expectations, job: JobOffer, levels: list[str] | None = None
+) -> list[tuple[str, str]]:
+    """Messages envoyés au LLM pour évaluer une offre (aussi utilisés pour estimer les tokens)."""
     criteria = ", ".join(f"{k} : {v}" for k, v in (job.criteria or {}).items())
     offer = (
         f"Titre : {job.title}\nEntreprise : {job.company}\nLieu : {job.location}\n"
@@ -138,18 +140,22 @@ def assess_job(
         f"Description :\n{(job.description or '')[:6000]}"
     )
     wanted = f"Niveau de poste visé : {level_prompt(levels)}\n" if levels else ""
+    return [
+        ("system", ASSESS_PROMPT),
+        (
+            "human",
+            f"## Profil du candidat\n{profile_text}\n\n"
+            f"## Attentes du candidat\n{wanted}{exp.to_prompt()}\n\n## Offre\n{offer}",
+        ),
+    ]
+
+
+def assess_job(
+    profile: CVProfile, exp: Expectations, job: JobOffer, levels: list[str] | None = None
+) -> JobAssessment:
     llm = structured(JobAssessment)
     with timed("llm", "evaluation"):
-        return llm.invoke(
-            [
-                ("system", ASSESS_PROMPT),
-                (
-                    "human",
-                    f"## Profil du candidat\n{profile.to_text()}\n\n"
-                    f"## Attentes du candidat\n{wanted}{exp.to_prompt()}\n\n## Offre\n{offer}",
-                ),
-            ]
-        )
+        return llm.invoke(assessment_messages(profile.to_text(), exp, job, levels))
 
 
 def top_matches(
@@ -206,10 +212,23 @@ def top_matches(
     return results
 
 
-def rank_jobs(
-    cv_id: int, prefs: Preferences, *, job_ids: list[int] | None = None, force: bool = False
-) -> list[dict]:
-    """Classe les offres pour un CV.
+@dataclass
+class Selection:
+    """Offres candidates d'un CV, de la plus proche à la moins proche (avant la limite `prefilter_top_k`)."""
+
+    profile: CVProfile
+    key: str  # empreinte des critères d'évaluation (cache des notes du LLM)
+    levels: list[str]
+    n_jobs: int  # offres du périmètre (collectées par la recherche, ou récentes)
+    ranked: list[tuple[JobOffer, float]] = field(default_factory=list)  # (offre, similarité)
+    adjustments: dict[int, float] = field(default_factory=dict)  # avis de l'utilisateur
+    total_adj: dict[int, float] = field(default_factory=dict)  # avis + niveau
+
+
+def select_candidates(
+    session: Session, cv_id: int, prefs: Preferences, job_ids: list[int] | None = None
+) -> Selection:
+    """Filtres durs puis tri sémantique (embeddings), ajusté par les avis et le niveau. Sans appel au LLM.
 
     `job_ids` restreint le tri aux offres collectées par la recherche en cours ; sinon toutes les
     offres vues sur la période `prefs.search.days` sont prises en compte.
@@ -222,78 +241,130 @@ def rank_jobs(
     key = assessment_key(exp, levels)
     embeddings = get_embeddings()
 
+    cv = session.get(CVRecord, cv_id)
+    if cv is None:
+        raise ValueError(f"CV {cv_id} introuvable")
+    if not cv.profile:
+        raise ValueError(f"CV {cv_id} non analysé")
+    profile = CVProfile.model_validate(cv.profile)
+    if cv.embedding is None:
+        with timed("embedding", "cv"):
+            cv.embedding = embeddings.embed_query(profile.to_text())
+
+    scope = JobOffer.id.in_(job_ids) if job_ids is not None else JobOffer.last_seen_at >= since
+    # Offres privées (alertes e-mail) : seulement celles du propriétaire du CV.
+    visible = or_(JobOffer.owner_user_id.is_(None), JobOffer.owner_user_id == cv.user_id)
+    jobs = session.scalars(select(JobOffer).where(scope, visible, JobOffer.description.is_not(None))).all()
+    selection = Selection(profile=profile, key=key, levels=levels, n_jobs=len(jobs))
+    if not jobs:
+        log.warning("Aucune offre récente en base. Lance d'abord la collecte.")
+        return selection
+
+    to_embed = [j for j in jobs if j.embedding is None]
+    if to_embed:
+        log.info("Calcul des embeddings de %d offres…", len(to_embed))
+        with timed("embedding", "offres", count=len(to_embed)):
+            vectors = embeddings.embed_documents([job_text(j) for j in to_embed])
+        for job, vector in zip(to_embed, vectors, strict=True):
+            job.embedding = vector
+        session.flush()
+
+    hidden, seen = set(ranking.hidden_job_ids), set(ranking.seen_job_ids)
+    kept: list[JobOffer] = []
+    reasons: list[str] = []
+    n_seen = 0
+    for job in jobs:
+        if job.id in hidden:
+            log.debug("Exclue « %s » : écartée par l'utilisateur", job.title)
+        elif job.id in seen:
+            log.debug("Exclue « %s » : déjà consultée", job.title)
+            n_seen += 1
+        elif reason := hard_filter_reason(job, exp, levels):
+            log.debug("Exclue « %s » : %s", job.title, reason)
+            reasons.append(reason)
+        else:
+            kept.append(job)
+    log.info("%d/%d offres passent les filtres.", len(kept), len(jobs))
+    if n_seen:
+        log.info("%d offre(s) déjà consultée(s) écartée(s).", n_seen)
+    if off_level := sum(1 for r in reasons if r.startswith(("niveau", "stage"))):
+        log.info("Niveau visé (%s) : %d offre(s) écartée(s).", level_prompt(levels), off_level)
+    if not kept:
+        return selection
+
+    # Pré-sélection : similarité CV ↔ offre, ajustée par les avis (offres aimées / écartées)
+    adjustments = feedback_adjustments(session, kept, ranking)
+    if adjustments:
+        moved = sum(1 for v in adjustments.values() if v)
+        log.info("Avis de l'utilisateur : %d offre(s) ajustée(s).", moved)
+    # … et par le niveau : bonus pour une offre ouverte aux débutants, malus si « confirmé ».
+    level_adj = (
+        {j.id: level_check(j.title, j.description, j.criteria, levels)[1] for j in kept} if levels else {}
+    )
+    total_adj = {
+        i: adjustments.get(i, 0.0) + level_adj.get(i, 0.0) for i in adjustments.keys() | level_adj.keys()
+    }
+    similarity = (1 - JobOffer.embedding.cosine_distance(cv.embedding)).label("similarity")
+    scored = session.execute(select(JobOffer, similarity).where(JobOffer.id.in_([j.id for j in kept]))).all()
+    selection.ranked = sorted(
+        ((job, float(sim)) for job, sim in scored),
+        key=lambda row: row[1] + total_adj.get(row[0].id, 0.0) / 100,
+        reverse=True,
+    )
+    selection.adjustments, selection.total_adj = adjustments, total_adj
+    return selection
+
+
+def needs_assessment(match: JobMatch | None, key: str, force: bool) -> bool:
+    """L'offre doit-elle être (ré)évaluée par le LLM ? Sinon la note en cache est réutilisée."""
+    return force or match is None or match.llm_score is None or match.assessment_key != key
+
+
+def preview_assessment(
+    cv_id: int, prefs: Preferences, job_ids: list[int] | None = None, force: bool = False, limit: int = 100
+) -> dict:
+    """Ce que l'évaluation par le LLM coûterait, sans l'appeler : offres candidates (au plus `limit`),
+    dans l'ordre de la pré-sélection, avec pour chacune « à évaluer » et les tokens envoyés estimés.
+
+    Les embeddings calculés ici sont enregistrés : l'évaluation qui suit ne les recalcule pas.
+    """
+    from getiajob.services.estimate import messages_tokens
+
     with session_scope() as session:
-        cv = session.get(CVRecord, cv_id)
-        if cv is None:
-            raise ValueError(f"CV {cv_id} introuvable")
-        if not cv.profile:
-            raise ValueError(f"CV {cv_id} non analysé")
-        profile = CVProfile.model_validate(cv.profile)
-        if cv.embedding is None:
-            with timed("embedding", "cv"):
-                cv.embedding = embeddings.embed_query(profile.to_text())
-
-        scope = JobOffer.id.in_(job_ids) if job_ids is not None else JobOffer.last_seen_at >= since
-        # Offres privées (alertes e-mail) : seulement celles du propriétaire du CV.
-        visible = or_(JobOffer.owner_user_id.is_(None), JobOffer.owner_user_id == cv.user_id)
-        jobs = session.scalars(
-            select(JobOffer).where(scope, visible, JobOffer.description.is_not(None))
-        ).all()
-        if not jobs:
-            log.warning("Aucune offre récente en base. Lance d'abord la collecte.")
-            return []
-
-        to_embed = [j for j in jobs if j.embedding is None]
-        if to_embed:
-            log.info("Calcul des embeddings de %d offres…", len(to_embed))
-            with timed("embedding", "offres", count=len(to_embed)):
-                vectors = embeddings.embed_documents([job_text(j) for j in to_embed])
-            for job, vector in zip(to_embed, vectors, strict=True):
-                job.embedding = vector
-            session.flush()
-
-        hidden, seen = set(ranking.hidden_job_ids), set(ranking.seen_job_ids)
-        kept: list[JobOffer] = []
-        reasons: list[str] = []
-        n_seen = 0
-        for job in jobs:
-            if job.id in hidden:
-                log.debug("Exclue « %s » : écartée par l'utilisateur", job.title)
-            elif job.id in seen:
-                log.debug("Exclue « %s » : déjà consultée", job.title)
-                n_seen += 1
-            elif reason := hard_filter_reason(job, exp, levels):
-                log.debug("Exclue « %s » : %s", job.title, reason)
-                reasons.append(reason)
-            else:
-                kept.append(job)
-        log.info("%d/%d offres passent les filtres.", len(kept), len(jobs))
-        if n_seen:
-            log.info("%d offre(s) déjà consultée(s) écartée(s).", n_seen)
-        if off_level := sum(1 for r in reasons if r.startswith(("niveau", "stage"))):
-            log.info("Niveau visé (%s) : %d offre(s) écartée(s).", level_prompt(levels), off_level)
-        if not kept:
-            return []
-
-        # Pré-sélection : similarité CV ↔ offre, ajustée par les avis (offres aimées / écartées)
-        adjustments = feedback_adjustments(session, kept, ranking)
-        if adjustments:
-            moved = sum(1 for v in adjustments.values() if v)
-            log.info("Avis de l'utilisateur : %d offre(s) ajustée(s).", moved)
-        # … et par le niveau : bonus pour une offre ouverte aux débutants, malus si « confirmé ».
-        level_adj = (
-            {j.id: level_check(j.title, j.description, j.criteria, levels)[1] for j in kept} if levels else {}
-        )
-        total_adj = {
-            i: adjustments.get(i, 0.0) + level_adj.get(i, 0.0) for i in adjustments.keys() | level_adj.keys()
+        sel = select_candidates(session, cv_id, prefs, job_ids)
+        top = sel.ranked[:limit]
+        matches = {
+            m.job_id: m
+            for m in session.scalars(
+                select(JobMatch).where(JobMatch.cv_id == cv_id, JobMatch.job_id.in_([j.id for j, _ in top]))
+            )
         }
-        similarity = (1 - JobOffer.embedding.cosine_distance(cv.embedding)).label("similarity")
-        scored = session.execute(
-            select(JobOffer, similarity).where(JobOffer.id.in_([j.id for j in kept]))
-        ).all()
-        candidates = sorted(
-            scored, key=lambda row: row[1] + total_adj.get(row[0].id, 0.0) / 100, reverse=True
-        )[: ranking.prefilter_top_k]
+        profile_text = sel.profile.to_text()
+        candidates = [
+            {
+                "job_id": job.id,
+                "eval": needs_assessment(matches.get(job.id), sel.key, force),
+                "in": messages_tokens(
+                    assessment_messages(profile_text, prefs.expectations, job, sel.levels), JobAssessment
+                ),
+            }
+            for job, _ in top
+        ]
+        return {"n_jobs": sel.n_jobs, "n_kept": len(sel.ranked), "candidates": candidates}
+
+
+def rank_jobs(
+    cv_id: int, prefs: Preferences, *, job_ids: list[int] | None = None, force: bool = False
+) -> list[dict]:
+    """Classe les offres pour un CV (cf. `select_candidates`), avec l'évaluation du LLM."""
+    exp, ranking = prefs.expectations, prefs.ranking
+    with session_scope() as session:
+        sel = select_candidates(session, cv_id, prefs, job_ids)
+        if not sel.ranked:
+            return []
+        profile, key, levels = sel.profile, sel.key, sel.levels
+        adjustments, total_adj = sel.adjustments, sel.total_adj
+        candidates = sel.ranked[: ranking.prefilter_top_k]
 
         cache_hits = 0
         for i, (job, sim) in enumerate(candidates, 1):
@@ -302,15 +373,17 @@ def rank_jobs(
             if match is None:
                 match = JobMatch(cv_id=cv_id, job_id=job.id)
                 session.add(match)
-            match.similarity = float(sim)
+            match.similarity = sim
 
-            if force or match.llm_score is None or match.assessment_key != key:
+            if needs_assessment(match, key, force):
                 log.info("[%d/%d] Évaluation : %s — %s", i, len(candidates), job.title, job.company)
                 try:
                     assessment = assess_job(profile, exp, job, levels)
                     match.llm_score = assessment.score
                     match.assessment = assessment.model_dump()
                     match.assessment_key = key
+                except llm_settings.TokenBudgetExceeded:
+                    raise  # limite de tokens atteinte : la recherche s'arrête en échec, message explicite
                 except Exception as exc:
                     log.warning("Évaluation impossible pour %s : %s", job.external_id, exc)
             else:

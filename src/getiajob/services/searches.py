@@ -10,6 +10,7 @@ from sqlalchemy import func, select, update
 
 from getiajob.config import Expectations, Preferences, RankingPreferences, load_preferences
 from getiajob.db import SearchSession, UserProfile, session_scope
+from getiajob.services import usage
 from getiajob.services.cancellation import SearchCancelled, check_cancelled, search_context
 from getiajob.services.cvs import owns_cv
 from getiajob.services.feedback import FeedbackSignals, feedback_signals
@@ -25,6 +26,7 @@ STEP_LABELS = {
 }
 STATUS_LABELS = {
     "pending": "En attente",
+    "awaiting": "À confirmer",
     "running": "En cours",
     "done": "Terminée",
     "failed": "Échec",
@@ -57,7 +59,9 @@ class SearchOptions:
 
 # Valeurs du formulaire mémorisées en plus des SearchOptions. « Ne pas interroger les sites » et
 # « Ré-évaluer toutes les offres » n'en font pas partie : ce sont des actions ponctuelles.
-FORM_EXTRAS = ("cv_id", "use_feedback", "feedback_llm", "hide_seen")
+FORM_EXTRAS = ("cv_id", "use_feedback", "feedback_llm", "hide_seen", "confirm_llm")
+# Recherche en pause après la collecte : l'utilisateur confirme (ou non) l'évaluation par le LLM
+AWAITING = "awaiting"
 
 
 def load_search_form(user_id: int) -> dict:
@@ -146,7 +150,9 @@ def create_search(
     force_rank: bool = False,
     feedback_llm: bool = True,
     hide_seen: bool = False,
+    confirm: bool = False,
 ) -> int:
+    """`confirm` : s'arrêter après la collecte pour faire confirmer l'évaluation par le LLM (coût estimé)."""
     if not owns_cv(user_id, cv_id):
         raise PermissionError("Ce CV n'appartient pas à l'utilisateur.")
     with session_scope() as session:
@@ -160,6 +166,7 @@ def create_search(
                 "force_rank": force_rank,
                 "feedback_llm": feedback_llm,  # résumé des avis transmis au LLM ?
                 "hide_seen": hide_seen,  # offres déjà consultées exclues ?
+                "confirm": confirm,  # confirmation avant l'évaluation par le LLM ?
             },
             status="pending",
         )
@@ -184,6 +191,7 @@ def rerank_search(user_id: int, search_id: int) -> int | None:
         name, cv_id = source.name, source.cv_id
         feedback_llm = source.params.get("feedback_llm", True)
         hide_seen = source.params.get("hide_seen", False)
+        confirm = source.params.get("confirm", False)
     fb = feedback_signals(user_id, with_digest=feedback_llm)
     prefs.expectations.feedback = fb.digest
     prefs.ranking.hidden_job_ids = fb.hidden_job_ids
@@ -199,6 +207,7 @@ def rerank_search(user_id: int, search_id: int) -> int | None:
         skip_scrape=True,
         feedback_llm=feedback_llm,
         hide_seen=hide_seen,
+        confirm=confirm,
     )
 
 
@@ -221,15 +230,23 @@ def _update(search_id: int, **values) -> None:
 
 
 def run_search(search_id: int) -> None:
-    """Exécute le pipeline LangGraph pour une session (appelé dans un thread de fond)."""
+    """Exécute une session dans un thread de fond : analyse du CV, collecte, puis tri et évaluation.
+
+    Si la recherche demande confirmation (`params["confirm"]`) et que des offres sont à évaluer par le
+    LLM, elle s'arrête après la collecte à l'état « awaiting », avec l'aperçu de l'évaluation
+    (`params["preview"]`) ; une fois confirmée (`confirm_search`), elle reprend directement au tri.
+    """
+    from getiajob.agents.ranker import preview_assessment, ranker_node
     from getiajob.graph import build_graph
 
     with session_scope() as session:
         search = session.get(SearchSession, search_id)
         if search is None or search.status != "pending":
             return
-        search.status, search.step, search.started_at = "running", "analyze_cv", datetime.now(UTC)
-        params, cv_id = dict(search.params), search.cv_id
+        resume = bool(search.params.get("confirmed"))
+        search.status, search.step = "running", "rank_jobs" if resume else "analyze_cv"
+        search.started_at = search.started_at if resume and search.started_at else datetime.now(UTC)
+        params, cv_id, owner = dict(search.params), search.cv_id, search.user_id
 
     try:
         if cv_id is None:
@@ -241,20 +258,32 @@ def run_search(search_id: int) -> None:
             "skip_scrape": skip,
             "force_rank": bool(params.get("force_rank")),
         }
-        final: dict = {}
-        with search_context(search_id):
-            for chunk in build_graph().stream(state, stream_mode="updates"):
-                for node, node_update in chunk.items():
-                    final.update(node_update or {})
-                    _update(search_id, step=_next_step(node, skip))
-                check_cancelled(min_interval=0)
+        with search_context(search_id), usage.for_user(owner):
+            if resume:  # collecte faite avant la confirmation
+                if params.get("job_ids") is not None:
+                    state["job_ids"] = params["job_ids"]
+            else:
+                for chunk in build_graph(rank=False).stream(state, stream_mode="updates"):
+                    for node, node_update in chunk.items():
+                        if node_update and "job_ids" in node_update:
+                            state["job_ids"] = node_update["job_ids"]
+                        _update(search_id, step=_next_step(node, skip))
+                    check_cancelled(min_interval=0)
+                if params.get("confirm") and _pause_for_confirmation(
+                    search_id, params, state, preview_assessment
+                ):
+                    return
+            _update(search_id, step="rank_jobs")
+            results = ranker_node(state)["results"]
+            check_cancelled(min_interval=0)
 
+        job_ids = state.get("job_ids")
         _update(
             search_id,
             status="done",
             step=None,
-            results=final.get("results", []),
-            n_offers=len(final["job_ids"]) if "job_ids" in final else None,
+            results=results,
+            n_offers=len(job_ids) if job_ids is not None else None,
             finished_at=datetime.now(UTC),
         )
     except SearchCancelled:
@@ -262,6 +291,45 @@ def run_search(search_id: int) -> None:
     except Exception as exc:
         log.exception("Échec de la recherche %s", search_id)
         _update(search_id, status="failed", step=None, error=str(exc)[:2000], finished_at=datetime.now(UTC))
+
+
+def _pause_for_confirmation(search_id: int, params: dict, state: dict, preview_assessment) -> bool:
+    """Met la recherche en attente de confirmation si le LLM a des offres à évaluer (True si en pause)."""
+    prefs = Preferences.model_validate(params["preferences"])
+    job_ids = state.get("job_ids")
+    preview = preview_assessment(state["cv_id"], prefs, job_ids, force=state["force_rank"])
+    if not any(c["eval"] for c in preview["candidates"][: prefs.ranking.prefilter_top_k]):
+        return False  # tout est déjà en cache : rien à facturer, on poursuit sans demander
+    _update(
+        search_id,
+        status=AWAITING,
+        step=None,
+        n_offers=len(job_ids) if job_ids is not None else None,
+        params=params | {"job_ids": job_ids, "preview": preview},
+    )
+    return True
+
+
+def confirm_search(user_id: int, search_id: int, max_offers: int) -> bool:
+    """Confirme l'évaluation par le LLM des `max_offers` offres les plus proches du CV, et remet la
+    recherche en file (le lancement est fait par l'appelant). False si elle n'attend plus de confirmation."""
+    with session_scope() as session:
+        search = session.scalar(
+            select(SearchSession).where(
+                SearchSession.id == search_id,
+                SearchSession.user_id == user_id,
+                SearchSession.status == AWAITING,
+            )
+        )
+        if search is None:
+            return False
+        params = dict(search.params)
+        prefs = dict(params["preferences"])
+        prefs["ranking"] = dict(prefs["ranking"]) | {"prefilter_top_k": max(1, int(max_offers))}
+        params |= {"preferences": prefs, "confirmed": True}
+        params.pop("preview", None)
+        search.params, search.status = params, "pending"
+        return True
 
 
 def list_searches(user_id: int, limit: int = 50) -> list[SearchSession]:
@@ -295,7 +363,7 @@ def stop_search(user_id: int, search_id: int) -> bool:
             .where(
                 SearchSession.id == search_id,
                 SearchSession.user_id == user_id,
-                SearchSession.status.in_(("pending", "running")),
+                SearchSession.status.in_(("pending", "running", AWAITING)),
             )
             .values(status="cancelled", step=None, error=STOPPED, finished_at=datetime.now(UTC))
         )
@@ -303,26 +371,24 @@ def stop_search(user_id: int, search_id: int) -> bool:
 
 
 def relaunch_search(user_id: int, search_id: int) -> bool:
-    """Remet en file une recherche arrêtée (mêmes paramètres). Le lancement est fait par l'appelant."""
+    """Remet en file une recherche arrêtée (mêmes paramètres, collecte comprise). Le lancement est fait
+    par l'appelant."""
     with session_scope() as session:
-        result = session.execute(
-            update(SearchSession)
-            .where(
+        search = session.scalar(
+            select(SearchSession).where(
                 SearchSession.id == search_id,
                 SearchSession.user_id == user_id,
                 SearchSession.status == "cancelled",
             )
-            .values(
-                status="pending",
-                step=None,
-                error=None,
-                results=None,
-                n_offers=None,
-                started_at=None,
-                finished_at=None,
-            )
         )
-        return bool(result.rowcount)
+        if search is None:
+            return False
+        # Une confirmation donnée avant l'arrêt ne vaut pas pour la nouvelle collecte
+        dropped = ("confirmed", "job_ids", "preview")
+        search.params = {k: v for k, v in search.params.items() if k not in dropped}
+        search.status, search.step, search.error = "pending", None, None
+        search.results = search.n_offers = search.started_at = search.finished_at = None
+        return True
 
 
 def delete_search(user_id: int, search_id: int) -> None:

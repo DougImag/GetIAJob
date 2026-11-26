@@ -7,7 +7,8 @@ from datetime import date
 import streamlit as st
 
 from getiajob.config import load_preferences
-from getiajob.services.cvs import list_cvs
+from getiajob.services import estimate
+from getiajob.services.cvs import CVSummary, list_cvs
 from getiajob.services.feedback import FeedbackSignals, feedback_signals, list_feedback
 from getiajob.services.searches import (
     SearchOptions,
@@ -21,6 +22,13 @@ from getiajob.services.seen import seen_ids
 from getiajob.services.users import get_profile
 from getiajob.web.layout import EXPERIENCE_LABELS, REMOTE_LABELS, freshness_input, parse_list, sources_input
 from getiajob.web.state import get_runner, go, go_profile, is_read_only, require_user
+from getiajob.web.views.admin_format import (
+    budget_status,
+    estimate_label,
+    estimate_note,
+    show_budget,
+    tokens_label,
+)
 
 
 def _clamp(value, low, high, default):
@@ -29,6 +37,33 @@ def _clamp(value, low, high, default):
         return type(default)(min(high, max(low, value)))
     except (TypeError, ValueError):
         return default
+
+
+def _estimate_caption(cv: CVSummary, max_offers: int, plan_queries: bool, user_id: int | None = None) -> bool:
+    """Tokens estimés de la recherche (au plus `max_offers` offres évaluées par l'IA), et budget restant.
+
+    Renvoie False si la limite de tokens est atteinte (lancement impossible)."""
+    if cv.profile is None:
+        return True
+    est = estimate.search(cv.profile.to_text(), max_offers, plan_queries, estimate.assessed_offers(cv.id))
+    cached = (
+        f" Les {est.already_assessed} offre(s) déjà évaluées pour ce CV ne sont pas réévaluées si elles "
+        "reviennent (sauf « Ré-évaluer toutes les offres »)."
+        if est.already_assessed
+        else ""
+    )
+    st.caption(
+        f":material/token: **Estimation IA** : ~{tokens_label(est.per_offer.total)} tokens par offre "
+        f"évaluée, soit au plus {estimate_label(est.maximum)} pour {max_offers} offres "
+        f"(« Offres évaluées par l'IA », options avancées){estimate_note(est.maximum)}.{cached}",
+        help="Calculée pour le CV et le nombre d'offres affichés à l'ouverture du formulaire : un autre "
+        "choix change le total en proportion. Tokens envoyés calculés d'après ton profil et la taille "
+        "moyenne des offres ; tokens générés d'après les dernières évaluations du même modèle.",
+    )
+    msg, level = budget_status(est.maximum.total, user_id)
+    if msg:
+        show_budget(msg, level)
+    return level != "block"
 
 
 def render() -> None:
@@ -209,8 +244,21 @@ def render() -> None:
             )
             force_rank = st.checkbox("Ré-évaluer toutes les offres avec l'IA (ignorer le cache)")
 
+        confirm_llm = st.toggle(
+            "Me montrer le coût estimé et demander confirmation avant l'évaluation par l'IA",
+            value=saved.get("confirm_llm", True),
+            help="La recherche s'arrête une fois les offres collectées : tu vois combien d'offres l'IA "
+            "va évaluer et le nombre de tokens précis, puis tu confirmes (ou réduis le nombre d'offres). "
+            "Pas de pause si toutes les offres ont déjà été évaluées.",
+        )
+        can_launch = _estimate_caption(
+            cvs[cv_index],
+            _clamp(saved.get("prefilter_top_k"), 5, 100, defaults.ranking.prefilter_top_k),
+            plan_queries=not saved.get("keywords"),
+            user_id=user.id,
+        )
         submitted = st.form_submit_button(
-            "Lancer la recherche", type="primary", icon=":material/rocket_launch:"
+            "Lancer la recherche", type="primary", icon=":material/rocket_launch:", disabled=not can_launch
         )
 
     if submitted and not sources and not skip_scrape:
@@ -248,6 +296,7 @@ def render() -> None:
             force_rank=force_rank,
             feedback_llm=use_feedback and feedback_llm,
             hide_seen=bool(seen) and hide_seen,
+            confirm=confirm_llm,
         )
         save_search_form(
             user.id,
@@ -256,6 +305,7 @@ def render() -> None:
             use_feedback=use_feedback if n_feedback else saved.get("use_feedback", True),
             feedback_llm=feedback_llm if n_feedback else saved.get("feedback_llm", True),
             hide_seen=hide_seen,
+            confirm_llm=confirm_llm,
         )
         get_runner().submit_search(search_id)
         st.session_state["selected_search"] = search_id

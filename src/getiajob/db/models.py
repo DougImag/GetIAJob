@@ -50,6 +50,8 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Dernier import des alertes e-mail lancé à la main (limité à un toutes les 5 min hors admin)
     last_mail_import_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Limite mensuelle de tokens du LLM pour cet utilisateur (None : pas de limite propre)
+    token_limit: Mapped[int | None] = mapped_column(Integer)
 
     profile: Mapped[UserProfile | None] = relationship(
         back_populates="user", cascade="all, delete-orphan", uselist=False
@@ -355,6 +357,47 @@ class MetricEvent(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     count: Mapped[int] = mapped_column(Integer, default=1)
     detail: Mapped[str | None] = mapped_column(Text)
+
+
+class AppSetting(Base):
+    """Réglage de l'application modifiable par un administrateur (Admin › Paramètres)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class LLMUsage(Base):
+    """Tokens consommés par un appel au LLM, rattachés à l'utilisateur pour qui il a été fait.
+
+    Conservé sans limite de durée (contrairement à `metric_events`) : sert au suivi des coûts.
+    `cost` : coût estimé au moment de l'appel (LLM_PRICE_INPUT / LLM_PRICE_OUTPUT), None si non tarifé.
+    """
+
+    __tablename__ = "llm_usage"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    # NULL : appel hors compte (ligne de commande) ou compte supprimé
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    step: Mapped[str] = mapped_column(String(60))  # cv_identity, evaluation, alerte_mail…
+    provider: Mapped[str] = mapped_column(String(20))
+    model: Mapped[str] = mapped_column(String(120))
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)  # raisonnement compris
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # Caractères envoyés : calibre l'estimation caractères → tokens de chaque modèle
+    input_chars: Mapped[int | None] = mapped_column(Integer)
+    cost: Mapped[float | None] = mapped_column(Float)
 
 
 class AuditLog(Base):

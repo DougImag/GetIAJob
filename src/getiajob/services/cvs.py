@@ -18,6 +18,7 @@ from sqlalchemy.orm import undefer
 from getiajob.config import get_settings
 from getiajob.db import CVRecord, JobMatch, MetricEvent, session_scope
 from getiajob.schemas import CVProfile
+from getiajob.services import usage
 
 log = logging.getLogger(__name__)
 
@@ -131,8 +132,11 @@ def run_cv_analysis(cv_id: int, force: bool = True) -> None:
         cv_id, analysis_status="running", analysis_started_at=datetime.now(UTC), analysis_progress=None
     )
     tracker = _ProgressTracker(cv_id, list(STEPS), max(1, get_settings().llm_concurrency))
+    with session_scope() as session:
+        owner = session.scalar(select(CVRecord.user_id).where(CVRecord.id == cv_id))
     try:
-        ensure_profile(cv_id, force=force, progress=tracker)
+        with usage.for_user(owner):
+            ensure_profile(cv_id, force=force, progress=tracker)
         _set_status(cv_id, analysis_status="done", analysis_error=None, analysis_progress=None)
     except Exception as exc:
         log.exception("Échec de l'analyse du CV %s", cv_id)

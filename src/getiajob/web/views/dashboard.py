@@ -11,7 +11,7 @@ from getiajob.db import SearchSession
 from getiajob.services.applications import Application, list_applications, upcoming
 from getiajob.services.cvs import CVSummary, list_cvs
 from getiajob.services.feedback import list_feedback
-from getiajob.services.searches import STATUS_LABELS, list_searches
+from getiajob.services.searches import AWAITING, STATUS_LABELS, list_searches
 from getiajob.services.users import ProfileData, get_profile
 from getiajob.web.layout import FRESHNESS_LABELS, REMOTE_LABELS, score_color
 from getiajob.web.state import go, go_profile, require_user
@@ -65,6 +65,19 @@ CSS = """
   .gj-dk-l { font-size: .8rem; color: var(--gj-muted); }
   .gj-dk-s { font-size: .74rem; color: var(--gj-muted); margin-top: .1rem; }
 
+  /* Consommation IA du mois */
+  .gj-ai { display: flex; gap: .9rem; align-items: center; padding: .85rem 1rem; border-radius: 16px;
+    background: var(--gj-surface); border: 1px solid var(--gj-line); margin: .2rem 0 .8rem; flex-wrap: wrap; }
+  .gj-ai-main { flex: 1; min-width: 14rem; }
+  .gj-ai-v { font-weight: 800; color: var(--gj-head); }
+  .gj-ai-v b { font-size: 1.25rem; }
+  .gj-ai-s { font-size: .76rem; color: var(--gj-muted); margin-top: .1rem; }
+  .gj-ai-lim { flex: 1; min-width: 14rem; }
+  .gj-ai-lim .gj-prog { margin: .35rem 0 .2rem; }
+  .gj-ai-lim .gj-prog i { background: linear-gradient(90deg, var(--gj-primary), var(--gj-primary-2)); }
+  .gj-ai-lim .gj-prog i.warn { background: linear-gradient(90deg, #f59e0b, #ea580c); }
+  .gj-ai-lim .gj-prog i.full { background: linear-gradient(90deg, #ef4444, #be123c); }
+
   /* Blocs */
   [class*="st-key-gj_dash_box"] { border-radius: 18px !important; }
   .gj-db-t { display: flex; align-items: center; gap: .5rem; font-weight: 800; color: var(--gj-head);
@@ -110,6 +123,7 @@ CSS = """
   .gj-badge.running, .gj-badge.pending { background: rgba(99, 102, 241, .14); color: var(--gj-primary); }
   .gj-badge.failed { background: rgba(239, 68, 68, .14); color: #b91c1c; }
   .gj-badge.cancelled { background: rgba(107, 114, 128, .14); color: #4b5563; }
+  .gj-badge.awaiting { background: rgba(234, 88, 12, .14); color: #c2410c; }
   .gj-empty { text-align: center; padding: 1.2rem .5rem; color: var(--gj-muted); font-size: .9rem; }
   .gj-empty svg { color: var(--gj-primary); opacity: .6; margin-bottom: .3rem; }
 </style>
@@ -215,6 +229,59 @@ def _kpis(
         ),
     ]
     st.markdown(f'<div class="gj-dk">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
+def _limit_html(title: str, used: int, limit: int, extra: str = "") -> str:
+    from getiajob.web.views.admin_format import tokens_label
+
+    pct = min(100, round(100 * used / limit))
+    tone = "full" if used >= limit else "warn" if pct >= 80 else ""
+    left = (
+        "<b>limite atteinte</b> : l'IA reprendra le 1er du mois prochain"
+        if tone == "full"
+        else f"{tokens_label(max(0, limit - used))} restants"
+    )
+    return (
+        f'<div class="gj-ai-lim"><div class="gj-ai-s">{title} : <b>{tokens_label(limit)}</b> tokens</div>'
+        f'<div class="gj-prog"><i class="{tone}" style="width:{pct}%"></i></div>'
+        f'<div class="gj-ai-s">{tokens_label(used)} utilisés ({pct} %) · {left}{extra}</div></div>'
+    )
+
+
+def _ai_usage(user_id: int) -> None:
+    """Tokens consommés ce mois-ci par l'utilisateur, et sa limite mensuelle (personnelle, sinon globale)."""
+    from getiajob.services import llm_settings
+    from getiajob.services.usage import month_tokens
+    from getiajob.web.views.admin_format import tokens_label
+
+    mine = month_tokens(user_id)
+    month = MONTHS[datetime.now().month - 1]
+    lim_html = ""
+    if (personal := llm_settings.user_limit(user_id)) is not None:
+        lim_html = _limit_html("Ta limite mensuelle", mine, personal)
+    else:
+        limit = llm_settings.token_limit()
+        if limit.enabled and limit.period == "month":
+            extra = " · LLM local (Ollama) non compté" if not limit.include_local else ""
+            lim_html = _limit_html(
+                "Limite mensuelle partagée par tous les utilisateurs",
+                llm_settings.used_tokens(limit),
+                limit.tokens,
+                extra,
+            )
+    st.markdown(
+        f'<div class="gj-ai"><div class="gj-dk-i violet">{ico("sparkles", 20)}</div>'
+        f'<div class="gj-ai-main"><div class="gj-ai-v"><b>{tokens_label(mine)}</b> tokens</div>'
+        f'<div class="gj-ai-s">consommés par l\'IA pour toi en {month} (analyses de CV, évaluation des '
+        f"offres, alertes e-mail)</div></div>{lim_html}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+MONTHS = [
+    "janvier", "février", "mars", "avril", "mai", "juin",
+    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+]  # fmt: skip
 
 
 def _next_step_text(apps: list[Application]) -> str:
@@ -345,12 +412,19 @@ def render() -> None:
 
     _hero(user.display_name, profile)
     _kpis(completion, cvs, searches, best, liked, len(feedback) - liked, apps)
+    _ai_usage(user.id)
 
     if analyzing := [cv for cv in cvs if cv.analyzing]:
         st.info(
             f"Analyse de « {analyzing[0].file_name} » en cours en arrière-plan. "
             "Tu peux continuer à naviguer, le profil sera prêt dans quelques minutes.",
             icon=":material/hourglass_top:",
+        )
+    if awaiting := [s for s in searches if s.status == AWAITING]:
+        st.warning(
+            f"Recherche « {awaiting[0].name} » : offres collectées, l'évaluation par l'IA attend ta "
+            "confirmation (coût estimé affiché dans « Mes recherches »).",
+            icon=":material/pending_actions:",
         )
     if running := [s for s in searches if s.status in ("pending", "running")]:
         st.info(

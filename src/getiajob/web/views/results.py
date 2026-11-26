@@ -11,6 +11,7 @@ import streamlit.components.v1 as components
 from getiajob.db import SearchSession
 from getiajob.report import render_markdown
 from getiajob.scraping.base import OFFER_SOURCE_LABELS
+from getiajob.services import estimate
 from getiajob.services.applications import (
     STATUS_COLORS,
     STATUSES,
@@ -32,8 +33,10 @@ from getiajob.services.feedback import (
 )
 from getiajob.services.pins import pinned_ids, send_pins, set_pin
 from getiajob.services.searches import (
+    AWAITING,
     STATUS_LABELS,
     STEP_LABELS,
+    confirm_search,
     delete_search,
     get_search,
     list_searches,
@@ -47,11 +50,25 @@ from getiajob.services.users import SessionUser
 from getiajob.web.layout import EXPERIENCE_LABELS, FRESHNESS_LABELS, REMOTE_LABELS, score_color
 from getiajob.web.layout import badges as layout_badges
 from getiajob.web.state import APPLICATION_FOCUS_KEY, get_runner, go, is_read_only, page, require_user
+from getiajob.web.views.admin_format import (
+    budget_status,
+    estimate_label,
+    estimate_note,
+    money_label,
+    show_budget,
+)
 
 SHORT_SKILL = 32  # au-delà, une « compétence » est une phrase : pas affichée sur la carte
 VERDICTS = {"green": "Très pertinent", "orange": "Pertinent", "red": "Peu pertinent"}
 COLORS = {"green": "#16a34a", "orange": "#ea580c", "red": "#dc2626"}
-STATUS_STYLE = {"done": "ok", "failed": "ko", "running": "run", "pending": "run", "cancelled": "off"}
+STATUS_STYLE = {
+    "done": "ok",
+    "failed": "ko",
+    "running": "run",
+    "pending": "run",
+    "cancelled": "off",
+    "awaiting": "wait",
+}
 
 # Icônes Lucide (https://lucide.dev, licence ISC)
 ICONS = {
@@ -104,6 +121,7 @@ CSS = """
   .gj-status.ko { background: #fee2e2; color: #991b1b; }
   .gj-status.run { background: #e0e7ff; color: #3730a3; }
   .gj-status.off { background: #f3f4f6; color: #4b5563; }
+  .gj-status.wait { background: #ffedd5; color: #9a3412; }
   .gj-sh-sub { color: #6b7280; font-size: .88rem; margin: .25rem 0 .8rem; display: flex; gap: 1rem;
     flex-wrap: wrap; }
   .gj-sh-sub span, .gj-chip, .gj-meta span { display: inline-flex; align-items: center; gap: .35rem; }
@@ -264,6 +282,71 @@ def _live_status(user_id: int, search_id: int) -> None:
         f"Démarrée depuis {int(elapsed.total_seconds() // 60)} min "
         f"{int(elapsed.total_seconds() % 60)} s. Tu peux quitter cette page, la recherche continue."
     )
+
+
+def _confirmation(user_id: int, s: SearchSession) -> None:
+    """Offres collectées : coût estimé de l'évaluation par l'IA, à confirmer (ou à réduire)."""
+    preview = s.params.get("preview") or {}
+    candidates = preview.get("candidates", [])
+    planned = s.params["preferences"]["ranking"]["prefilter_top_k"]
+    collected = (
+        f"**{s.n_offers}** offre(s) collectée(s), " if s.n_offers is not None else "Offres déjà en base : "
+    )
+    st.markdown(
+        f"#### :material/pending_actions: Évaluation par l'IA à confirmer\n"
+        f"{collected}**{preview.get('n_kept', len(candidates))}** passent tes filtres "
+        f"(sur {preview.get('n_jobs', '?')}). L'IA évalue les plus proches de ton CV ; une offre déjà "
+        "évaluée avec les mêmes critères garde sa note, sans nouvel appel."
+    )
+    if not candidates:
+        st.info("Aucune offre à évaluer.")
+        return
+    default = min(planned, len(candidates))
+    n = (
+        st.slider(
+            "Offres évaluées par l'IA",
+            1,
+            len(candidates),
+            default,
+            key=f"confirm-n-{s.id}",
+            help="Les plus proches de ton CV après le tri sémantique (et tes avis).",
+        )
+        if len(candidates) > 1
+        else 1
+    )
+    est = estimate.evaluation(candidates, n)
+    n_new = sum(1 for c in candidates[:n] if c["eval"])
+    c = st.columns(3)
+    c[0].metric("Nouvelles évaluations", n_new)
+    c[1].metric("Déjà évaluées (gratuites)", n - n_new)
+    c[2].metric("Coût estimé", f"~{money_label(est.cost)}" if est.cost is not None else "–")
+    st.caption(
+        f":material/token: {estimate_label(est)}{estimate_note(est)}. Tokens envoyés calculés d'après "
+        "le texte de chaque offre ; tokens générés d'après les dernières évaluations du même modèle."
+    )
+    msg, level = budget_status(est.total, user_id)
+    if msg:
+        show_budget(msg, level)
+    with st.container(horizontal=True, gap="small"):
+        if st.button(
+            f"Lancer l'évaluation ({n_new} offre(s))" if n_new else "Terminer le classement",
+            type="primary",
+            icon=":material/play_arrow:",
+            disabled=is_read_only() or (level == "block" and n_new > 0),
+            key=f"confirm-{s.id}",
+        ):
+            if confirm_search(user_id, s.id, n):
+                get_runner().submit_search(s.id)
+            st.rerun()
+        if st.button(
+            "Annuler la recherche",
+            icon=":material/close:",
+            disabled=is_read_only(),
+            key=f"cancel-{s.id}",
+            help="Les offres collectées restent en base pour tes prochaines recherches.",
+        ):
+            stop_search(user_id, s.id)
+            st.rerun()
 
 
 # --------------------------------------------------------------------------- #
@@ -708,6 +791,9 @@ def render() -> None:
 
     if s.status in ("pending", "running"):
         _live_status(user.id, s.id)
+        return
+    if s.status == AWAITING:
+        _confirmation(user.id, s)
         return
     if s.status == "failed":
         st.error(f"La recherche a échoué : {s.error}", icon=":material/error:")

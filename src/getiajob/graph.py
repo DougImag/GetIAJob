@@ -29,14 +29,18 @@ def _after_cv(state: PipelineState) -> str:
     return "rank_jobs" if state.get("skip_scrape") else "scrape_jobs"
 
 
-def build_graph():
+def build_graph(rank: bool = True):
+    """Pipeline complet ; `rank=False` s'arrête avant le tri (l'interface demande d'abord confirmation
+    de l'évaluation par le LLM, puis appelle `ranker_node`)."""
     graph = StateGraph(PipelineState)
     graph.add_node("analyze_cv", cv_analyzer_node)
     graph.add_node("scrape_jobs", job_scraper_node)
-    graph.add_node("rank_jobs", ranker_node)
+    last = "rank_jobs" if rank else END
+    if rank:
+        graph.add_node("rank_jobs", ranker_node)
+        graph.add_edge("rank_jobs", END)
 
     graph.add_edge(START, "analyze_cv")
-    graph.add_conditional_edges("analyze_cv", _after_cv, ["scrape_jobs", "rank_jobs"])
-    graph.add_edge("scrape_jobs", "rank_jobs")
-    graph.add_edge("rank_jobs", END)
+    graph.add_conditional_edges("analyze_cv", _after_cv, {"scrape_jobs": "scrape_jobs", "rank_jobs": last})
+    graph.add_edge("scrape_jobs", last)
     return graph.compile()

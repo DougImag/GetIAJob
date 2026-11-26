@@ -74,6 +74,7 @@ def session_scope() -> Iterator[Session]:
 # Mises à niveau idempotentes des bases créées avant la v0.2 (create_all n'ajoute pas de colonnes).
 # À remplacer par Alembic quand le schéma évoluera davantage.
 UPGRADES = [
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_limit INTEGER",
     "ALTER TABLE cv_profiles ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE",
     "ALTER TABLE cv_profiles ADD COLUMN IF NOT EXISTS file_data BYTEA",
     "ALTER TABLE cv_profiles ALTER COLUMN profile DROP NOT NULL",
@@ -127,6 +128,8 @@ UPGRADES = [
     # v0.12.3 : types d'alertes e-mail par utilisateur (APEC, Free-Work…)
     "ALTER TABLE mail_imports ADD COLUMN IF NOT EXISTS mail_type VARCHAR(255)",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_mail_import_at TIMESTAMPTZ",
+    # v0.12.5 : calibrage de l'estimation des tokens (table créée en 0.12.5, colonne ajoutée ensuite)
+    "ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS input_chars INTEGER",
     "UPDATE mail_imports SET mail_type = 'apec.fr' WHERE mail_type IS NULL AND status = 'imported'",
     # Mails classés « pas une alerte APEC » avant les types de mail : relus une fois pour détecter leur type
     "DELETE FROM mail_imports WHERE status = 'not_alert' AND mail_type IS NULL AND created_at < '2026-11-20'",

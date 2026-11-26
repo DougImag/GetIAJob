@@ -1,6 +1,7 @@
 from getiajob.db.models import (
     AccessRequest,
     ApplicationNote,
+    AppSetting,
     AuditLog,
     AuthSession,
     Base,
@@ -11,6 +12,7 @@ from getiajob.db.models import (
     JobOffer,
     JobPin,
     JobView,
+    LLMUsage,
     MailImport,
     MailType,
     MetricEvent,
@@ -23,6 +25,7 @@ from getiajob.db.session import READ_ONLY, ReadOnlyError, get_engine, init_db, s
 
 __all__ = [
     "AccessRequest",
+    "AppSetting",
     "ApplicationNote",
     "AuditLog",
     "AuthSession",
@@ -34,6 +37,7 @@ __all__ = [
     "JobOffer",
     "JobPin",
     "JobView",
+    "LLMUsage",
     "MailImport",
     "MailType",
     "MetricEvent",

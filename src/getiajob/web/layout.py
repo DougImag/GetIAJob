@@ -242,13 +242,14 @@ DARK_CSS = """
   .gj-fr-chips span svg { color: #a5b4fc !important; }
 
   .gj-badge.done { color: #86efac !important; } .gj-badge.failed { color: #fca5a5 !important; }
-  .gj-badge.cancelled { color: #d1d5db !important; }
+  .gj-badge.cancelled { color: #d1d5db !important; } .gj-badge.awaiting { color: #fdba74 !important; }
   .gj-badge.running, .gj-badge.pending, .gj-db-t svg, .gj-dk-ring { color: #a5b4fc !important; }
 
   /* Mes recherches */
   .gj-status.ok, .gj-skill.ok { background: rgba(34, 197, 94, .16) !important; color: #86efac !important; }
   .gj-status.ko { background: rgba(239, 68, 68, .16) !important; color: #fca5a5 !important; }
   .gj-status.run { background: rgba(99, 102, 241, .2) !important; color: #c7d2fe !important; }
+  .gj-status.wait { background: rgba(234, 88, 12, .2) !important; color: #fdba74 !important; }
   .gj-skill.miss { background: rgba(249, 115, 22, .16) !important; color: #fdba74 !important; }
   .gj-skill.more { background: var(--gj-surface-2) !important; color: var(--gj-muted) !important; }
   .gj-verdict { background: color-mix(in srgb, var(--c) 18%, transparent) !important; }
@@ -380,13 +381,15 @@ def _apply_theme_switch() -> None:
 
 
 def sidebar_footer() -> None:
-    s = get_settings()
+    from getiajob.services.llm_settings import current
+
+    s, llm = get_settings(), current()
     with st.sidebar:
-        # Modèles configurés (LLM_MODEL / EMBEDDING_MODEL), pas d'appel à Ollama à chaque affichage
+        # Modèles configurés (Admin › Paramètres / EMBEDDING_MODEL), sans appel au LLM à chaque affichage
         st.caption(  # « deux espaces + \n » = retour à la ligne en Markdown
             "Modèles open source"
-            + (" via Ollama :  \n" if s.llm_provider == "ollama" else " :  \n")
-            + f"`{s.llm_model}` (analyse et notes)  \n"
+            + (" via Ollama :  \n" if llm.provider == "ollama" else " :  \n")
+            + f"`{llm.model}` (analyse et notes)  \n"
             f"`{s.embedding_model}` (similarité)"
         )
 

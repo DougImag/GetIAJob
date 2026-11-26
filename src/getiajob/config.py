@@ -9,33 +9,75 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+Provider = Literal["ollama", "openai"]
+JsonMode = Literal["json_schema", "json_object"]
+ReasoningEffort = Literal["", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+DEFAULT_PROFILE = "default"
+
+
+class LLMProfile(BaseModel):
+    """Une configuration de LLM sélectionnable dans Admin › Paramètres.
+
+    La configuration « default » vient des variables LLM_* ; les autres sont déclarées dans le .env par
+    LLM_PROFILES__<NOM>__<CHAMP> (ex. LLM_PROFILES__OLALA__MODEL=Olala-v1.0-mini-7A1B).
+    """
+
+    model_config = ConfigDict(frozen=True)  # hashable : sert de clé au cache des clients LLM
+
+    name: str = DEFAULT_PROFILE
+    label: str = ""  # libellé affiché (défaut : fournisseur et modèle)
+    provider: Provider = "openai"
+    model: str
+    base_url: str = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"  # API compatible OpenAI
+    api_key: str = ""
+    json_mode: JsonMode = "json_schema"
+    reasoning_effort: ReasoningEffort = ""
+    price_input: float | None = None  # par million de tokens envoyés
+    price_output: float | None = None  # par million de tokens générés (raisonnement compris)
+
+    @property
+    def title(self) -> str:
+        where = "Ollama (local)" if self.provider == "ollama" else self.base_url.split("//")[-1].split("/")[0]
+        return self.label or f"{self.model} · {where}"
 
 
 class Settings(BaseSettings):
     """Paramètres techniques, surchargeables par variables d'environnement (ex: LLM_MODEL)."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # « __ » : champs imbriqués (LLM_PROFILES__OLALA__MODEL → llm_profiles["olala"].model)
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_nested_delimiter="__")
 
     database_url: str = "postgresql+psycopg://getiajob:getiajob@db:5432/getiajob"
 
     ollama_base_url: str = "http://ollama:11434"
     # Fournisseur du LLM : « ollama » (local) ou « openai » (toute API compatible OpenAI, ex. OVHcloud
     # AI Endpoints). Les embeddings restent toujours sur Ollama (EMBEDDING_MODEL).
-    llm_provider: Literal["ollama", "openai"] = "ollama"
+    llm_provider: Provider = "ollama"
     llm_base_url: str = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"  # si LLM_PROVIDER=openai
     llm_api_key: str = ""  # vide = accès anonyme (OVH : 1 requête par an et par modèle → clé indispensable)
     # Sortie structurée côté API OpenAI : « json_schema » (schéma imposé) ou « json_object » (JSON libre,
     # schéma donné dans le prompt) si le fournisseur ou le modèle refuse json_schema.
-    llm_json_mode: Literal["json_schema", "json_object"] = "json_schema"
+    llm_json_mode: JsonMode = "json_schema"
     llm_max_retries: int = 3  # nouvelles tentatives sur erreur réseau / 429 (API distante seulement)
+    # Effort de raisonnement des modèles qui raisonnent (Olala, gpt-oss…), API distante seulement.
+    # Vide = paramètre non envoyé (défaut du modèle). « low » ou « minimal » : réponses plus rapides.
+    llm_reasoning_effort: ReasoningEffort = ""
     llm_model: str = "qwen2.5:7b"
     llm_temperature: float = 0.0
     llm_num_ctx: int = 8192
     llm_concurrency: int = 2  # appels LLM simultanés (analyse du CV) ; cf. OLLAMA_NUM_PARALLEL
     llm_max_tokens: int = 6144  # longueur max d'une réponse du LLM (borne un appel parti en boucle)
     llm_timeout: int = 900  # secondes max par appel au LLM (évite une analyse bloquée indéfiniment)
+    # Prix par million de tokens (envoyés / générés, raisonnement compris), pour le coût estimé affiché
+    # dans Admin › Supervision › Consommation IA. Vide = coût non calculé (ex. Olala ou Ollama : 0).
+    llm_price_input: float | None = None
+    llm_price_output: float | None = None
+    llm_price_currency: str = "€"
+    # Autres configurations de LLM, au choix dans Admin › Paramètres (cf. LLMProfile)
+    llm_profiles: dict[str, LLMProfile] = Field(default_factory=dict)
     embedding_model: str = "nomic-embed-text"
     embedding_dim: int = 768
 
@@ -90,6 +132,29 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def llm_profiles(settings: Settings | None = None) -> dict[str, LLMProfile]:
+    """Configurations de LLM disponibles : « default » (variables LLM_*) puis celles de LLM_PROFILES."""
+    s = settings or get_settings()
+    default = LLMProfile(
+        name=DEFAULT_PROFILE,
+        label="",
+        provider=s.llm_provider,
+        model=s.llm_model,
+        base_url=s.llm_base_url,
+        api_key=s.llm_api_key,
+        json_mode=s.llm_json_mode,
+        reasoning_effort=s.llm_reasoning_effort,
+        price_input=s.llm_price_input,
+        price_output=s.llm_price_output,
+    )
+    profiles = {DEFAULT_PROFILE: default}
+    for name, profile in sorted(s.llm_profiles.items()):
+        key = name.lower()
+        if key != DEFAULT_PROFILE:
+            profiles[key] = profile.model_copy(update={"name": key})
+    return profiles
 
 
 # --------------------------------------------------------------------------- #

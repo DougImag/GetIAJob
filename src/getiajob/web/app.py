@@ -11,6 +11,7 @@ from getiajob.web.views import (
     account,
     admin_monitoring,
     admin_quality,
+    admin_settings,
     admin_sources,
     admin_users,
     applications,
@@ -81,6 +82,7 @@ PAGE_SPECS = {
         "admin-supervision",
     ),
     "admin_quality": (admin_quality.render, "Qualité & IA", ":material/insights:", "admin-qualite"),
+    "admin_settings": (admin_settings.render, "Paramètres", ":material/tune:", "admin-parametres"),
 }
 if user and mailbox_configured() and (n_pending := pending_mail_types(user.id)):
     # Nouveaux types de mail à valider : signalés dans le menu
@@ -108,13 +110,15 @@ if user:
             pages["admin_quality"],
             pages["admin_users"],
             pages["admin_sources"],
+            pages["admin_settings"],
         ]
 else:
     navigation = {"": [pages["home"], pages["login"]]}
 
 state.register_pages(pages)
 # Déconnecté : pas de menu latéral, on navigue par le header (logo → accueil, bouton de connexion)
-current = st.navigation(navigation, position="sidebar" if user else "hidden")
+# expanded=True : toutes les pages toujours visibles (pas de « View more » au-delà de 10 entrées)
+current = st.navigation(navigation, position="sidebar" if user else "hidden", expanded=True)
 state.pending_goto()
 layout.header(current.title, user)
 if state.impersonator() is not None:  # lecture seule ou mode édition

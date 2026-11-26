@@ -22,6 +22,7 @@ from getiajob.scraping.apec_mail import _links as links
 from getiajob.scraping.base import JobPosting
 from getiajob.scraping.mail_offers import SOURCE as MAIL_SOURCE
 from getiajob.scraping.mail_offers import extract_offers
+from getiajob.services import usage
 from getiajob.services.monitoring import record
 
 log = logging.getLogger(__name__)
@@ -204,7 +205,8 @@ def sync_mailbox(*, dry_run: bool = False) -> SyncReport:
                     postings: list[JobPosting] = []
                     if status == "imported":
                         try:
-                            postings = _postings(alert, mt, dry_run)
+                            with usage.for_user(user.id):
+                                postings = _postings(alert, mt, dry_run)
                         except Exception as exc:  # LLM indisponible : le mail sera relu à la prochaine relève
                             log.warning("Extraction des offres impossible (%s) : %s", alert.subject, exc)
                             session.rollback()
