@@ -237,7 +237,8 @@ CV_CSS = """
   .gj-xp-when { display: flex; flex-direction: column; align-items: flex-end; gap: .25rem; font-size: .82rem;
     color: var(--gj-muted); white-space: nowrap; }
   .gj-xp-when .period { font-weight: 600; color: var(--gj-text); }
-  .gj-xp-tags { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .55rem; }
+  .gj-xp-head { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; }
+  .gj-xp-tags { display: flex; flex-wrap: wrap; gap: .35rem; }
   .gj-xp-tag { font-size: .72rem; font-weight: 700; padding: .12rem .55rem; border-radius: 999px;
     background: rgba(99, 102, 241, .12); color: var(--gj-primary); }
   .gj-xp-tag.now { background: rgba(34, 197, 94, .14); color: #16a34a; }
@@ -411,9 +412,11 @@ def _experience_card(e: Experience) -> str:
         tags.append('<span class="gj-xp-tag now">En poste</span>')
     if e.contract_type:
         tags.append(f'<span class="gj-xp-tag">{escape(e.contract_type)}</span>')
-    body = ""
+    # Nature du poste et « En poste » à la hauteur de l'intitulé
+    head = f'<div class="gj-xp-title">{escape(e.title)}</div>'
     if tags:
-        body += f'<div class="gj-xp-tags">{"".join(tags)}</div>'
+        head += f'<div class="gj-xp-tags">{"".join(tags)}</div>'
+    body = ""
     if e.description:
         body += f'<p class="gj-xp-desc">{escape(e.description)}</p>'
     if e.achievements:
@@ -422,9 +425,8 @@ def _experience_card(e: Experience) -> str:
     if e.technologies:
         chips = "".join(f"<span>{escape(t)}</span>" for t in e.technologies)
         body += f'<div class="gj-xp-tech">{chips}</div>'
-    top = (
-        f'<div><div class="gj-xp-title">{escape(e.title)}</div>{_place(e.company, e.location)}</div>'
-        + _when(e.start, e.end, e.duration)
+    top = f'<div><div class="gj-xp-head">{head}</div>{_place(e.company, e.location)}</div>' + _when(
+        e.start, e.end, e.duration
     )
     return _timeline_item(top, body, _is_current(e))
 
